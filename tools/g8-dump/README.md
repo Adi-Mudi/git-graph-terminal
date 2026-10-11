@@ -76,7 +76,7 @@ Created by `make-fixtures.sh` under `tests/fixtures/repos/` (git-ignored, genera
 | fixture | shape |
 | ------- | ----- |
 | `linear` | 5 commits on one branch, annotated tag `v1`, no merges → 1 lane, 1 colour index |
-| `branch-merge-rebase` | `main` (m1-m3) + `feature` forked at m1 (f1-f2) + `--no-ff` merge + `rebase-like` forked at m1 (r1-r2), annotated tag `v2` → 3 lanes, merge row, colour reuse |
+| `branch-merge-rebase` | `main` (m1–m4) + `feature` forked at m1 (f1–f2) + a `--no-ff` merge into `main` + `rebase-like` forked at m1 (r1–r2), annotated tag `v2` → 9 commits, 3 lanes, one merge row, colour reuse |
 
 ### Determinism
 

@@ -1,0 +1,48 @@
+name: CI
+
+# P0 T4 skeleton. Activates once this project has a GitHub remote
+# (the repository does not exist yet — escalation item, see p0-report.md).
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: fmt + clippy + test (ubuntu-latest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Format check
+        run: cargo fmt --check
+
+      - name: Lint (clippy, warnings are errors)
+        run: cargo clippy -- -D warnings
+
+      - name: Test
+        run: cargo test
+
+# Not wired here yet (needs the read-only reference checkout, which is not a
+# submodule of this repository): the G8 parity harness.
+#   cd tools/g8-dump && npm ci && npm run fixtures && npm run dump && npm run check
+# Belongs into the M1 parity job once the reference is vendored/pinned in CI.
