@@ -34,8 +34,18 @@ mod render {
 
 #[path = "../src/app.rs"]
 mod app;
+// W5: `app.rs` owns the menu lifecycle, so the menu model and the dispatch map
+// it drives come along for the ride. Each is included whole, but this test only
+// drives the parts `app.rs` calls, so silence the rest.
+#[allow(dead_code)]
+#[path = "../src/actions.rs"]
+mod actions;
+#[allow(dead_code)]
 #[path = "../src/keymap.rs"]
 mod keymap;
+#[allow(dead_code)]
+#[path = "../src/menu.rs"]
+mod menu;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

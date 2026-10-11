@@ -18,7 +18,39 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use crate::app::Action;
+use crate::app::{Action, MenuNav};
+
+/// Does this key open the context menu for the selected row?
+///
+/// `Shift+F10` is the Windows/GTK "menu key" convention and `m` is the
+/// terminal-friendly alias; `Esc` stays "quit" when no menu is open.
+pub fn opens_menu(key: KeyEvent) -> bool {
+    if key.modifiers.contains(KeyModifiers::ALT) {
+        return false;
+    }
+    key.code == KeyCode::F(10)
+        || (key.code == KeyCode::Char('m') && !key.modifiers.contains(KeyModifiers::CONTROL))
+}
+
+/// Translate a key for the **open** context menu.
+///
+/// `Esc` closes it (W5/W6 overlays claim `Esc` before [`action_for`] sees it),
+/// arrows/`j`/`k` move, `Enter` activates, and a bare letter is a shortcut.
+pub fn menu_nav_for(key: KeyEvent) -> Option<MenuNav> {
+    if key.modifiers.contains(KeyModifiers::ALT) || key.modifiers.contains(KeyModifiers::CONTROL) {
+        return None;
+    }
+    match key.code {
+        KeyCode::Esc => Some(MenuNav::Close),
+        KeyCode::Up | KeyCode::Char('k') => Some(MenuNav::Up),
+        KeyCode::Down | KeyCode::Char('j') => Some(MenuNav::Down),
+        KeyCode::Enter => Some(MenuNav::Activate),
+        KeyCode::Char(key) if key.is_ascii_alphabetic() => {
+            Some(MenuNav::Shortcut(key.to_ascii_lowercase()))
+        }
+        _ => None,
+    }
+}
 
 /// Map one key event to an [`Action`], or `None` when the key is unbound.
 ///

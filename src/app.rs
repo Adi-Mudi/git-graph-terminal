@@ -28,9 +28,14 @@
 use std::collections::HashSet;
 use std::path::Path;
 
+use crate::actions::{self, RefAction};
 use crate::data::{self, Commit};
 use crate::layout::types::{GraphLayout, RowIdx};
 use crate::layout::{self, LayoutOpts, NavDir, NO_ROW};
+use crate::menu::{
+    classify_ref, surface_for_refs, ColumnId, CommitOrder, ContextMenu, MenuAction, MenuColumns,
+    MenuContext, MenuSurface,
+};
 
 /// Extra terminal rows an expanded commit row occupies in W4.
 ///
@@ -67,6 +72,8 @@ pub struct StatusBarState {
     pub height: u16,
     /// Selected row (selection info for the status bar).
     pub selected: RowIdx,
+    /// Result of the last context-menu action (W5 feedback, Rule 10-safe text).
+    pub last_action: Option<String>,
     /// Startup/refresh error (the TUI stays alive).
     pub error: Option<String>,
 }
@@ -84,6 +91,13 @@ pub struct AppState {
     pub expanded: HashSet<RowIdx>,
     /// Viewport offset in **display rows** (see the module docs).
     pub scroll: u16,
+    /// Which optional text columns are visible + the commit ordering (W5).
+    pub columns: ColumnState,
+    /// The open context menu, if any (W5).
+    pub menu: Option<ContextMenu>,
+    /// Text the last menu action asked to copy (W5/T4, emitted as OSC 52 by
+    /// `main.rs` only when `GGT_OSC52=1`).
+    pub pending_clipboard: Option<String>,
     /// Status-bar / viewport snapshot.
     pub status: StatusBarState,
 }
@@ -129,6 +143,119 @@ pub enum Outcome {
     Redraw,
     /// The caller should tear down and exit.
     Quit,
+}
+
+/// Which optional text columns the table shows, plus the commit ordering (W5/T3).
+///
+/// The default is the pre-W5 table (`idx`, hash, date, author, subject, refs)
+/// with `git`'s `--date-order`, so the P0/P3 dumps stay reproducible.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ColumnState {
+    pub date: bool,
+    pub author: bool,
+    /// The commit subject column (the reference calls it `Commit`).
+    pub commit: bool,
+    pub order: CommitOrder,
+}
+
+impl Default for ColumnState {
+    fn default() -> Self {
+        ColumnState {
+            date: true,
+            author: true,
+            commit: true,
+            order: CommitOrder::Date,
+        }
+    }
+}
+
+impl ColumnState {
+    pub fn is_visible(&self, column: ColumnId) -> bool {
+        match column {
+            ColumnId::Date => self.date,
+            ColumnId::Author => self.author,
+            ColumnId::Commit => self.commit,
+        }
+    }
+
+    pub fn set_visible(&mut self, column: ColumnId, visible: bool) {
+        match column {
+            ColumnId::Date => self.date = visible,
+            ColumnId::Author => self.author = visible,
+            ColumnId::Commit => self.commit = visible,
+        }
+    }
+
+    /// Flip a column; returns its new visibility.
+    pub fn toggle(&mut self, column: ColumnId) -> bool {
+        let next = !self.is_visible(column);
+        self.set_visible(column, next);
+        next
+    }
+
+    /// The snapshot the header menu renders (checkmarks + radio).
+    pub fn menu_columns(&self) -> MenuColumns {
+        MenuColumns {
+            date: self.date,
+            author: self.author,
+            commit: self.commit,
+            order: self.order,
+        }
+    }
+}
+
+/// The name a column shows in the header and in status messages.
+pub fn column_label(column: ColumnId) -> &'static str {
+    match column {
+        ColumnId::Date => "Date",
+        ColumnId::Author => "Author",
+        ColumnId::Commit => "Commit",
+    }
+}
+
+/// A keypress translated for the open context menu.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MenuNav {
+    Up,
+    Down,
+    Activate,
+    Close,
+    /// Single-key shortcut inside the menu (`a`..`z`).
+    Shortcut(char),
+}
+
+/// What [`AppState::menu_nav`] did, so the caller can dispatch on activation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MenuKey {
+    /// The highlight moved (redraw only).
+    Moved,
+    /// A row was activated; the caller runs [`AppState::activate_menu`].
+    Activated,
+    /// The menu was closed without activating anything.
+    Closed,
+    /// Nothing happened (a disabled row, or an unmatched key).
+    Ignored,
+}
+
+/// Screen geometry the renderer used, so a mouse event can be routed back to a
+/// surface without re-deriving the layout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HitGeometry {
+    /// The whole main area (graph + text columns + header).
+    pub body: ratatui::layout::Rect,
+    /// Width of the graph pane in columns.
+    pub graph_width: u16,
+    /// Does the area start with a one-row table header?
+    pub has_header: bool,
+}
+
+/// What a screen cell belongs to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClickTarget {
+    /// The table header row, right of the graph → column menu.
+    ColumnHeader,
+    /// A commit row, with the surface its refs (or its position) imply.
+    Row(RowIdx, MenuSurface, String),
 }
 
 impl AppState {
@@ -212,6 +339,7 @@ impl AppState {
             width: 0,
             height: 0,
             selected: 0,
+            last_action: None,
             error,
         };
         Self {
@@ -220,6 +348,9 @@ impl AppState {
             selected: 0,
             expanded: HashSet::new(),
             scroll: 0,
+            columns: ColumnState::default(),
+            menu: None,
+            pending_clipboard: None,
             status,
         }
     }
@@ -280,6 +411,274 @@ impl AppState {
         }
         let max_scroll = self.display_rows().saturating_sub(view);
         self.scroll = self.scroll.min(max_scroll);
+    }
+
+    /// Is a context menu open?
+    pub fn menu_is_open(&self) -> bool {
+        self.menu.is_some()
+    }
+
+    /// Does any loaded row carry a remote-tracking decoration?
+    ///
+    /// `data.rs` does not load the remote list, so the refs are the only signal
+    /// the view has; the branch menu greys out `Push` accordingly.
+    pub fn has_remotes(&self) -> bool {
+        self.rows.iter().any(|commit| {
+            commit
+                .refs
+                .iter()
+                .any(|reference| matches!(classify_ref(reference).0, MenuSurface::RemoteBranch))
+        })
+    }
+
+    /// Seed a [`MenuContext`] from the selected row and the surface.
+    fn menu_context(&self, surface: MenuSurface, target_ref: Option<&str>) -> MenuContext {
+        let commit = self.rows.get(self.selected as usize);
+        let mut ctx = MenuContext {
+            columns: self.columns.menu_columns(),
+            has_remotes: self.has_remotes(),
+            ..MenuContext::default()
+        };
+        if let Some(commit) = commit {
+            ctx.hash = commit.hash.clone();
+            ctx.subject = commit.subject.clone();
+        }
+        let name = target_ref.map(str::to_string).or_else(|| {
+            commit
+                .and_then(|commit| surface_for_refs(&commit.refs))
+                .map(|(_, name)| name)
+        });
+        if let Some(name) = name {
+            let base = MenuContext::from_ref(surface, &name);
+            ctx.ref_name = base.ref_name;
+            ctx.remote = base.remote;
+            ctx.branch = base.branch;
+            ctx.selector = base.selector;
+        }
+        match surface {
+            // A row menu is about the commit, not about a ref name.
+            MenuSurface::CommitRow | MenuSurface::Uncommitted => {
+                ctx.ref_name.clear();
+                ctx.branch.clear();
+                ctx.remote.clear();
+                ctx.selector.clear();
+            }
+            _ => {}
+        }
+        if matches!(surface, MenuSurface::Uncommitted) {
+            ctx.hash = "HEAD".to_string();
+        }
+        ctx.is_current_branch = !ctx.ref_name.is_empty() && ctx.ref_name == self.status.branch;
+        ctx
+    }
+
+    /// Open the menu for `surface` at screen `(x, y)`; `target_ref` names the
+    /// decoration that was clicked (mouse) or picked from the row (keyboard).
+    pub fn open_menu(
+        &mut self,
+        surface: MenuSurface,
+        target_ref: Option<&str>,
+        x: u16,
+        y: u16,
+    ) -> MenuSurface {
+        let context = self.menu_context(surface, target_ref);
+        let mut menu = ContextMenu::open(surface, x, y, context);
+        menu.selected = menu.first_enabled();
+        self.menu = Some(menu);
+        surface
+    }
+
+    /// Keyboard path (Shift+F10): open the menu for the selected row.
+    pub fn open_menu_for_selection(&mut self, x: u16, y: u16) -> Option<MenuSurface> {
+        let (surface, name) = {
+            let commit = self.rows.get(self.selected as usize)?;
+            surface_for_refs(&commit.refs).unwrap_or((MenuSurface::CommitRow, commit.hash.clone()))
+        };
+        Some(self.open_menu(surface, Some(&name), x, y))
+    }
+
+    /// Route one key to the open menu.
+    pub fn menu_nav(&mut self, nav: MenuNav) -> MenuKey {
+        if nav == MenuNav::Close {
+            self.menu = None;
+            return MenuKey::Closed;
+        }
+        let Some(menu) = self.menu.as_mut() else {
+            return MenuKey::Ignored;
+        };
+        match nav {
+            MenuNav::Up => {
+                menu.move_selection(-1);
+                MenuKey::Moved
+            }
+            MenuNav::Down => {
+                menu.move_selection(1);
+                MenuKey::Moved
+            }
+            MenuNav::Shortcut(key) => {
+                if menu.select_shortcut(key)
+                    && menu
+                        .selected_item()
+                        .map(|item| item.enabled)
+                        .unwrap_or(false)
+                {
+                    MenuKey::Activated
+                } else {
+                    MenuKey::Moved
+                }
+            }
+            MenuNav::Activate => {
+                if menu
+                    .selected_item()
+                    .map(|item| item.enabled)
+                    .unwrap_or(false)
+                {
+                    MenuKey::Activated
+                } else {
+                    MenuKey::Ignored
+                }
+            }
+            MenuNav::Close => MenuKey::Closed,
+        }
+    }
+
+    /// Close the menu and run the highlighted row, returning the status line.
+    ///
+    /// This is the W5 "menu → dispatch → refresh" seam: safe plans run and the
+    /// view reloads, gated plans stop at the W6 confirmation stub, and local
+    /// plans (column toggles, clipboard copies) update the view state.
+    pub fn activate_menu(&mut self, repo: &Path) -> String {
+        let Some(menu) = self.menu.take() else {
+            return "no context menu is open".to_string();
+        };
+        let Some(item) = menu.selected_item().cloned() else {
+            return "the context menu has no rows".to_string();
+        };
+        if !item.enabled {
+            self.menu = Some(menu);
+            return format!("{}: disabled for this row", item.label);
+        }
+
+        let line = match item.action.clone() {
+            MenuAction::Dispatch(action) => {
+                let mut target = menu.context.action_target();
+                target.clipboard = clipboard_text(item.id, &menu.context);
+                let outcome = actions::dispatch(repo, action, &target);
+                if matches!(outcome.plan().kind, actions::PlanKind::Execute)
+                    && outcome.plan().mutates()
+                {
+                    reduce(self, Action::Refresh, repo);
+                }
+                // Copy rows hand their text to the OSC 52 bridge, but only a
+                // plan that actually runs (never a gated confirmation stub).
+                if matches!(
+                    item.action,
+                    MenuAction::Dispatch(RefAction::CopyToClipboard)
+                ) && !target.clipboard.is_empty()
+                {
+                    self.pending_clipboard = Some(target.clipboard.clone());
+                }
+                outcome.status_line()
+            }
+            MenuAction::ToggleColumn(column) => {
+                let visible = self.columns.toggle(column);
+                format!(
+                    "{} column: {}",
+                    column_label(column),
+                    if visible { "shown" } else { "hidden" }
+                )
+            }
+            MenuAction::SetColumnOrder(order) => {
+                self.columns.order = order;
+                format!("ordering: {} ({})", order.label(), order.git_flag())
+            }
+            MenuAction::SelectInDropdown(name) => {
+                format!("selected {name} in the branches dropdown (local view state)")
+            }
+            MenuAction::UnselectInDropdown(name) => {
+                format!("cleared {name} from the branches dropdown (local view state)")
+            }
+            MenuAction::FollowInternalLink(link) => {
+                format!("followed internal link {link} (local view state)")
+            }
+        };
+        self.status.last_action = Some(line.clone());
+        line
+    }
+
+    /// The commit row occupying display row `display`, if any.
+    pub fn row_at_display(&self, display: u16) -> Option<RowIdx> {
+        let mut cursor = 0u16;
+        for row in 0..self.rows.len() as RowIdx {
+            let height = self.row_height(row);
+            if display >= cursor && display < cursor.saturating_add(height) {
+                return Some(row);
+            }
+            cursor = cursor.saturating_add(height);
+        }
+        None
+    }
+
+    /// Route a screen cell back to a click target (mouse right-click support).
+    pub fn surface_at(&self, x: u16, y: u16, hit: &HitGeometry) -> Option<ClickTarget> {
+        let body = hit.body;
+        if body.width == 0 || body.height == 0 {
+            return None;
+        }
+        if x < body.x || x >= body.x.saturating_add(body.width) {
+            return None;
+        }
+        if y < body.y || y >= body.y.saturating_add(body.height) {
+            return None;
+        }
+        let header_rows = u16::from(hit.has_header && body.height > 1);
+        let row_in_body = y - body.y;
+        let table_x = body.x.saturating_add(hit.graph_width);
+        if header_rows == 1 && row_in_body == 0 {
+            // Only the table side has a header; the graph starts one row lower.
+            return (x >= table_x).then_some(ClickTarget::ColumnHeader);
+        }
+        let display = self.scroll + (row_in_body - header_rows);
+        let row = self.row_at_display(display)?;
+        let commit = self.rows.get(row as usize)?;
+        if x < table_x {
+            return Some(ClickTarget::Row(
+                row,
+                MenuSurface::CommitRow,
+                commit.hash.clone(),
+            ));
+        }
+        // The refs column is the last 20 cells of the text area (`columns.rs`).
+        let refs_left = body.x.saturating_add(body.width).saturating_sub(20);
+        if x >= refs_left {
+            if let Some((surface, name)) = surface_for_refs(&commit.refs) {
+                return Some(ClickTarget::Row(row, surface, name));
+            }
+        }
+        Some(ClickTarget::Row(
+            row,
+            MenuSurface::CommitRow,
+            commit.hash.clone(),
+        ))
+    }
+}
+
+/// Clipboard text for a `Copy …` menu row, keyed by the inventory id.
+fn clipboard_text(id: &str, ctx: &MenuContext) -> String {
+    match id {
+        "A32" | "A50" => ctx.hash.clone(),
+        "A33" => ctx.subject.clone(),
+        "A49" => {
+            if ctx.selector.is_empty() {
+                ctx.ref_name.clone()
+            } else {
+                ctx.selector.clone()
+            }
+        }
+        "A55" | "A21" | "A43" => ctx.ref_name.clone(),
+        "A64" => ctx.url.clone(),
+        "A72" | "A73" => ctx.path.clone(),
+        _ => ctx.ref_name.clone(),
     }
 }
 
@@ -386,6 +785,7 @@ fn reload(state: &mut AppState, repo: &Path) {
     let fresh = AppState::load(repo);
     state.rows = fresh.rows;
     state.layout = fresh.layout;
+    state.menu = None;
     state.status.branch = fresh.status.branch;
     state.status.head = fresh.status.head;
     state.status.branches = fresh.status.branches;
@@ -735,5 +1135,431 @@ mod tests {
         data::run_git(&dir, &["add", "f.txt"]).expect("git add");
         data::run_git(&dir, &["commit", "-q", "-m", "c1"]).expect("git commit");
         dir
+    }
+
+    // ---- W5: context menus, column state and mouse routing ----------------
+
+    /// A three-row history with a local branch, a remote branch and a tag, so
+    /// every ref surface has something to open on.
+    ///
+    /// Note `feature` (no slash): [`classify_ref`] has no remote list to consult,
+    /// so it reads any `a/b` decoration as a remote-tracking ref.
+    fn refs_state() -> AppState {
+        let commits = vec![
+            commit("c0", &["c1"], &["HEAD -> main", "origin/main"]),
+            commit("c1", &["c2"], &["feature"]),
+            commit("c2", &[], &["tag: v1.0"]),
+        ];
+        // `state_of` reports branch `main`, which is also the HEAD decoration.
+        state_of(commits)
+    }
+
+    /// A 100x9 main area: a 4-column graph pane plus the one-row table header.
+    fn geometry() -> HitGeometry {
+        HitGeometry {
+            body: ratatui::layout::Rect {
+                x: 0,
+                y: 0,
+                width: 100,
+                height: 9,
+            },
+            graph_width: 4,
+            has_header: true,
+        }
+    }
+
+    #[test]
+    fn column_state_starts_at_the_p0_default() {
+        let columns = ColumnState::default();
+        assert!(columns.is_visible(ColumnId::Date));
+        assert!(columns.is_visible(ColumnId::Author));
+        assert!(columns.is_visible(ColumnId::Commit));
+        assert_eq!(columns.order, CommitOrder::Date);
+        assert_eq!(columns.order.git_flag(), "--date-order");
+    }
+
+    #[test]
+    fn toggling_a_column_flips_only_that_column() {
+        let mut columns = ColumnState::default();
+        assert!(!columns.toggle(ColumnId::Author));
+        assert!(!columns.author);
+        assert!(columns.date && columns.commit);
+        assert!(columns.toggle(ColumnId::Author));
+        assert_eq!(column_label(ColumnId::Author), "Author");
+    }
+
+    #[test]
+    fn has_remotes_reads_the_refs() {
+        assert!(refs_state().has_remotes());
+        assert!(!state_of(linear(2)).has_remotes());
+    }
+
+    #[test]
+    fn the_column_header_menu_reflects_and_sets_the_column_state() {
+        let mut state = refs_state();
+        state.columns.author = false;
+        state.open_menu(MenuSurface::ColumnHeader, None, 20, 0);
+        let menu = state.menu.as_ref().expect("menu open");
+        // The checkmark on each toggle row mirrors the current visibility.
+        let checked: Vec<(&str, bool)> = menu
+            .items
+            .iter()
+            .filter(|item| matches!(item.action, MenuAction::ToggleColumn(_)))
+            .map(|item| (item.label, item.checked))
+            .collect();
+        assert!(
+            checked.contains(&("Author", false)),
+            "author unticked: {checked:?}"
+        );
+        assert!(
+            checked.contains(&("Date", true)),
+            "date ticked: {checked:?}"
+        );
+        assert!(
+            checked.contains(&("Commit", true)),
+            "commit ticked: {checked:?}"
+        );
+
+        // Activating the highlighted row is a local state change, not git.
+        assert!(matches!(
+            menu.items[menu.selected].action,
+            MenuAction::ToggleColumn(ColumnId::Date)
+        ));
+        let line = state.activate_menu(Path::new("."));
+        assert!(!state.columns.date, "the first row hid the date column");
+        assert!(line.contains("Date column: hidden"), "{line}");
+        assert!(state.status.last_action.as_deref() == Some(line.as_str()));
+        assert!(state.menu.is_none(), "activating closes the menu");
+    }
+
+    #[test]
+    fn opening_on_a_branch_row_seeds_the_branch_context() {
+        let mut state = refs_state();
+        state.selected = 1; // `feature`
+        let surface = state.open_menu(MenuSurface::Branch, Some("feature"), 10, 3);
+        assert_eq!(surface, MenuSurface::Branch);
+        let menu = state.menu.as_ref().expect("menu open");
+        assert_eq!(menu.context.ref_name, "feature");
+        assert!(!menu.context.is_current_branch);
+        assert!(menu.context.has_remotes);
+        assert_eq!(menu.selected, menu.first_enabled());
+    }
+
+    #[test]
+    fn the_current_branch_is_flagged_for_the_menu() {
+        let mut state = refs_state();
+        state.selected = 0; // `HEAD -> main`
+        state.open_menu(MenuSurface::Branch, Some("main"), 10, 0);
+        assert!(state.menu.as_ref().unwrap().context.is_current_branch);
+    }
+
+    #[test]
+    fn a_commit_row_menu_has_no_ref_name() {
+        let mut state = refs_state();
+        state.selected = 2;
+        state.open_menu(MenuSurface::CommitRow, None, 10, 4);
+        let ctx = &state.menu.as_ref().unwrap().context;
+        assert_eq!(ctx.hash, "c2");
+        assert_eq!(ctx.subject, "commit c2");
+        assert!(ctx.ref_name.is_empty(), "the row menu is about the commit");
+        assert!(ctx.branch.is_empty());
+    }
+
+    #[test]
+    fn the_uncommitted_menu_targets_head() {
+        let mut state = refs_state();
+        state.open_menu(MenuSurface::Uncommitted, None, 10, 1);
+        let ctx = &state.menu.as_ref().unwrap().context;
+        assert_eq!(ctx.hash, "HEAD");
+        assert!(ctx.selector.is_empty());
+    }
+
+    #[test]
+    fn open_menu_for_selection_picks_the_ref_surface() {
+        let mut state = refs_state();
+        state.selected = 1;
+        assert_eq!(
+            state.open_menu_for_selection(0, 1),
+            Some(MenuSurface::Branch)
+        );
+        assert_eq!(state.menu.as_ref().unwrap().context.ref_name, "feature");
+        state.selected = 2;
+        assert_eq!(state.open_menu_for_selection(0, 1), Some(MenuSurface::Tag));
+        assert_eq!(state.menu.as_ref().unwrap().context.ref_name, "v1.0");
+        state.selected = 0;
+        assert_eq!(
+            state.open_menu_for_selection(0, 1),
+            Some(MenuSurface::Branch)
+        );
+        assert_eq!(state.menu.as_ref().unwrap().context.ref_name, "main");
+    }
+
+    #[test]
+    fn open_menu_for_selection_is_none_on_an_empty_repo() {
+        let mut state = state_of(Vec::new());
+        assert_eq!(state.open_menu_for_selection(0, 1), None);
+        assert!(!state.menu_is_open());
+    }
+
+    #[test]
+    fn menu_navigation_wraps_and_skips_nothing() {
+        let mut state = refs_state();
+        state.open_menu(MenuSurface::ColumnHeader, None, 20, 0);
+        let len = state.menu.as_ref().unwrap().items.len();
+        assert_eq!(state.menu_nav(MenuNav::Up), MenuKey::Moved);
+        assert_eq!(state.menu.as_ref().unwrap().selected, len - 1, "wraps up");
+        assert_eq!(state.menu_nav(MenuNav::Down), MenuKey::Moved);
+        assert_eq!(state.menu.as_ref().unwrap().selected, 0, "wraps down");
+        assert_eq!(state.menu_nav(MenuNav::Close), MenuKey::Closed);
+        assert!(!state.menu_is_open());
+    }
+
+    #[test]
+    fn menu_navigation_ignores_keys_with_no_menu_open() {
+        let mut state = refs_state();
+        assert_eq!(state.menu_nav(MenuNav::Down), MenuKey::Ignored);
+        assert_eq!(state.menu_nav(MenuNav::Activate), MenuKey::Ignored);
+    }
+
+    #[test]
+    fn a_disabled_row_never_activates() {
+        let mut state = refs_state();
+        state.open_menu(MenuSurface::Branch, Some("feature"), 10, 3);
+        let disabled = state
+            .menu
+            .as_ref()
+            .unwrap()
+            .items
+            .iter()
+            .position(|item| !item.enabled);
+        let Some(index) = disabled else {
+            return; // nothing greyed out for this surface; nothing to prove
+        };
+        state.menu.as_mut().unwrap().selected = index;
+        assert_eq!(state.menu_nav(MenuNav::Activate), MenuKey::Ignored);
+        assert!(state.menu_is_open(), "a dead row leaves the menu up");
+        assert!(state.activate_menu(Path::new(".")).contains("disabled"));
+        assert!(state.menu_is_open());
+    }
+
+    #[test]
+    fn a_shortcut_letter_activates_its_row() {
+        let mut state = refs_state();
+        state.open_menu(MenuSurface::Tag, Some("v1.0"), 10, 4);
+        let (key, id) = {
+            let menu = state.menu.as_ref().unwrap();
+            let item = menu
+                .items
+                .iter()
+                .find(|item| item.shortcut.is_some() && item.enabled)
+                .expect("at least one shortcut row");
+            (item.shortcut.unwrap(), item.id)
+        };
+        assert_eq!(state.menu_nav(MenuNav::Shortcut(key)), MenuKey::Activated);
+        let menu = state.menu.as_ref().unwrap();
+        assert_eq!(menu.items[menu.selected].id, id);
+    }
+
+    #[test]
+    fn copy_hash_reaches_the_clipboard_bridge() {
+        let mut state = refs_state();
+        state.selected = 0;
+        state.open_menu(MenuSurface::CommitRow, None, 10, 0);
+        let index = state
+            .menu
+            .as_ref()
+            .unwrap()
+            .items
+            .iter()
+            .position(|item| item.id == "A32")
+            .expect("Copy Commit Hash row");
+        state.menu.as_mut().unwrap().selected = index;
+        // Hermetic: point the fallback file at this test's own path while the
+        // shared env lock is held (`actions`' clipboard tests mutate it too).
+        let _guard = crate::actions::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let path =
+            std::env::temp_dir().join(format!("ggt-w5-menu-clip-{}.txt", std::process::id()));
+        std::env::set_var("GGT_CLIPBOARD_FILE", &path);
+        let line = state.activate_menu(Path::new("."));
+        std::env::remove_var("GGT_CLIPBOARD_FILE");
+        assert_eq!(state.pending_clipboard.as_deref(), Some("c0"));
+        assert!(line.contains("copied to"), "{line}");
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("clipboard file"),
+            "c0"
+        );
+        let _ = std::fs::remove_file(&path);
+        assert!(!state.menu_is_open());
+    }
+
+    #[test]
+    fn a_gated_row_stops_at_the_confirmation_stub() {
+        let mut state = refs_state();
+        state.open_menu(MenuSurface::Branch, Some("feature"), 10, 3);
+        let index = state
+            .menu
+            .as_ref()
+            .unwrap()
+            .items
+            .iter()
+            .position(|item| matches!(item.action, MenuAction::Dispatch(RefAction::DeleteBranch)))
+            .expect("Delete Branch row");
+        state.menu.as_mut().unwrap().selected = index;
+        let before = state.rows.clone();
+        let line = state.activate_menu(Path::new("/nonexistent/ggt-w5"));
+        assert!(line.contains("needs confirmation"), "{line}");
+        assert_eq!(state.rows, before, "a gated plan never runs git");
+        assert!(state.pending_clipboard.is_none());
+    }
+
+    #[test]
+    fn local_rows_stub_through_the_status_line() {
+        let mut state = refs_state();
+        state.open_menu(MenuSurface::Branch, Some("feature"), 10, 3);
+        let (dropdown, link) = {
+            let menu = state.menu.as_ref().unwrap();
+            let dropdown = menu
+                .items
+                .iter()
+                .position(|item| matches!(item.action, MenuAction::SelectInDropdown(_)));
+            let link = menu
+                .items
+                .iter()
+                .position(|item| matches!(item.action, MenuAction::FollowInternalLink(_)));
+            (dropdown, link)
+        };
+        if let Some(index) = dropdown {
+            state.menu.as_mut().unwrap().selected = index;
+            assert!(state.activate_menu(Path::new(".")).contains("dropdown"));
+            state.open_menu(MenuSurface::Branch, Some("feature"), 10, 3);
+        }
+        if let Some(index) = link {
+            state.menu.as_mut().unwrap().selected = index;
+            assert!(state
+                .activate_menu(Path::new("."))
+                .contains("internal link"));
+        }
+    }
+
+    #[test]
+    fn column_order_rows_switch_the_git_flag() {
+        let mut state = refs_state();
+        state.open_menu(MenuSurface::ColumnHeader, None, 20, 0);
+        // Pick a radio row that is *not* the order we are already using.
+        let index = state
+            .menu
+            .as_ref()
+            .unwrap()
+            .items
+            .iter()
+            .position(|item| {
+                matches!(
+                    item.action,
+                    MenuAction::SetColumnOrder(order) if order != state.columns.order
+                )
+            })
+            .expect("a different ordering row");
+        let expected = match state.menu.as_ref().unwrap().items[index].action {
+            MenuAction::SetColumnOrder(order) => order,
+            _ => unreachable!(),
+        };
+        state.menu.as_mut().unwrap().selected = index;
+        let line = state.activate_menu(Path::new("."));
+        assert_eq!(state.columns.order, expected);
+        assert!(line.contains(expected.git_flag()), "{line}");
+    }
+
+    #[test]
+    fn activate_menu_without_a_menu_is_a_no_op() {
+        let mut state = refs_state();
+        assert!(state
+            .activate_menu(Path::new("."))
+            .contains("no context menu"));
+    }
+
+    #[test]
+    fn row_at_display_maps_every_display_row() {
+        let mut state = state_of(linear(3));
+        assert_eq!(state.row_at_display(0), Some(0));
+        assert_eq!(state.row_at_display(2), Some(2));
+        assert_eq!(state.row_at_display(3), None);
+        state.expanded.insert(0);
+        // Row 0 now spans display rows 0..=EXPANDED_EXTRA_ROWS.
+        assert_eq!(state.row_at_display(EXPANDED_EXTRA_ROWS), Some(0));
+        assert_eq!(state.row_at_display(EXPANDED_EXTRA_ROWS + 1), Some(1));
+    }
+
+    #[test]
+    fn surface_at_routes_the_header_row() {
+        let state = refs_state();
+        let hit = geometry();
+        // Column 0 is the graph; the table header is only right of it.
+        assert_eq!(state.surface_at(0, 0, &hit), None);
+        assert_eq!(
+            state.surface_at(10, 0, &hit),
+            Some(ClickTarget::ColumnHeader)
+        );
+    }
+
+    #[test]
+    fn surface_at_routes_rows_refs_and_empty_space() {
+        let state = refs_state();
+        let hit = geometry();
+        // The header occupies screen row 0, so commit row `d` sits at row `1 + d`.
+        assert_eq!(
+            state.surface_at(0, 1, &hit),
+            Some(ClickTarget::Row(
+                0,
+                MenuSurface::CommitRow,
+                "c0".to_string()
+            )),
+            "the graph pane is the commit row"
+        );
+        // The refs column is the last 20 cells of a 100-wide body.
+        let refs = state.surface_at(95, 1, &hit).expect("refs hit");
+        match refs {
+            ClickTarget::Row(0, surface, name) => {
+                assert_eq!(name, "main", "the branch ref outranks the remote ref");
+                assert_eq!(surface, MenuSurface::Branch);
+            }
+            other => panic!("expected a row hit, got {other:?}"),
+        }
+        // Past the last commit, and outside the body entirely.
+        assert_eq!(state.surface_at(0, 4, &hit), None);
+        assert_eq!(state.surface_at(101, 1, &hit), None);
+        assert_eq!(state.surface_at(0, 99, &hit), None);
+    }
+
+    #[test]
+    fn surface_at_follows_the_scroll_offet() {
+        let mut state = state_of(linear(6));
+        let hit = geometry();
+        state.scroll = 2;
+        assert_eq!(
+            state.surface_at(0, 1, &hit),
+            Some(ClickTarget::Row(
+                2,
+                MenuSurface::CommitRow,
+                "c2".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn surface_at_on_a_row_with_no_refs_is_the_commit_menu() {
+        let state = state_of(linear(3));
+        let hit = geometry();
+        match state
+            .surface_at(95, 2, &hit)
+            .expect("row 1 in the refs column")
+        {
+            ClickTarget::Row(1, surface, name) => {
+                assert_eq!(surface, MenuSurface::CommitRow);
+                assert_eq!(name, "c1");
+            }
+            other => panic!("expected the commit menu, got {other:?}"),
+        }
     }
 }

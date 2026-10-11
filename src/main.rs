@@ -1,11 +1,18 @@
 //! git-graph-terminal — TUI scaffold with a graph renderer (W1 / lane b1).
 //!
-//! Event loop + terminal setup/teardown (alternate screen, raw mode), the graph
-//! renderer in [`render`], and a status bar over the commit data from [`data`].
+//! Event loop + terminal setup/teardown (alternate screen, raw mode, mouse
+//! capture), the graph renderer in [`render`], and a status bar over the commit
+//! data from [`data`].
 //!
-//! W4 replaces the old ad-hoc `App` + `ratatui::ListState` handling with
+//! W4 replaced the old ad-hoc `App` + `ratatui::ListState` handling with
 //! [`app::AppState`] (owned selection / scroll / expand state) and a single,
 //! testable [`keymap::action_for`] → [`app::reduce`] pipeline.
+//!
+//! W5 adds the **context menu**: `m` / `Shift+F10` / right-click opens the menu
+//! for the selected row (or, on the table header, the column menu); arrows and
+//! `j`/`k` move inside it, `Enter` or a row's shortcut letter activates, `Esc`
+//! closes without activating. Copy rows hand their text to the OSC 52 bridge,
+//! which only writes to stdout when `GGT_OSC52=1`.
 //!
 //! Usage:
 //! * `git-graph-terminal [REPO]` (default `.`) — borderless graph view over the
@@ -18,17 +25,21 @@
 //! Keys: `j`/`k`/↓/↑ move · ←/→ (Ctrl+↓/↑) walk the branch · PgUp/PgDn · Home/End ·
 //! Enter expand · `s`/`S` stash next/prev (**no Shift = next**, R1.2) · `r` reload · `q`/Esc quit.
 
+mod actions;
 mod app;
 mod data;
 mod keymap;
 mod layout;
+mod menu;
 mod render;
 
 use std::io::{self, Stdout, Write};
 use std::path::PathBuf;
 use std::time::Duration;
 
-use crossterm::event::{self, Event, KeyEventKind};
+use crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind, MouseButton, MouseEventKind,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -36,7 +47,8 @@ use crossterm::terminal::{
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 
-use crate::app::{reduce, Action, AppState, Outcome};
+use crate::app::{reduce, Action, AppState, ClickTarget, MenuKey, MenuNav, Outcome};
+use crate::menu::MenuSurface;
 use crate::render::glyphs::GlyphTier;
 use crate::render::ViewOptions;
 
@@ -52,13 +64,13 @@ impl Drop for TerminalGuard {
 fn setup_terminal() -> io::Result<Terminal<CrosstermBackend<Stdout>>> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     Terminal::new(CrosstermBackend::new(stdout))
 }
 
 fn restore_terminal() -> io::Result<()> {
     disable_raw_mode()?;
-    execute!(io::stdout(), LeaveAlternateScreen)?;
+    execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture)?;
     Ok(())
 }
 
@@ -85,6 +97,9 @@ fn main() -> io::Result<()> {
     // `--mock` always shows the graph; a real repo hides it for `--text-list`
     // and for `--dump` (so the P0 bordered list frame stays reproducible).
     let show_graph = mock || !(text_list || dump);
+    // Rows the graph view spends outside the commit body: the status bar, plus
+    // the table header the graph pane has no counterpart for.
+    let chrome = if show_graph { 2 } else { 1 };
 
     if dump {
         let view = make_view(&state, tier, colour, mock, show_graph);
@@ -97,43 +112,139 @@ fn main() -> io::Result<()> {
     loop {
         {
             // Refresh the viewport every frame so paging and the
-            // follow-the-selection scroll know the real terminal height. The
-            // graph body loses one row to the status bar and one to the table
-            // header; the text list loses only the status bar.
+            // follow-the-selection scroll know the real terminal height.
             let size = terminal.size()?;
             state.status.width = size.width;
-            let chrome = if show_graph { 2 } else { 1 };
             state.status.height = size.height.saturating_sub(chrome).max(1);
 
             let view = make_view(&state, tier, colour, mock, show_graph);
             terminal.draw(|frame| render::ui(frame, &state, &view))?;
         }
 
+        // Everything the mouse router needs for this frame: the full screen
+        // rect (for menu clamping) and the main-area geometry.
+        let screen = ratatui::layout::Rect {
+            x: 0,
+            y: 0,
+            width: state.status.width,
+            height: state.status.height.saturating_add(chrome),
+        };
+        let view = make_view(&state, tier, colour, mock, show_graph);
+        let hit = render::hit_geometry(&state, &view);
+
         if !event::poll(Duration::from_millis(250))? {
             continue;
         }
-        let Event::Key(key) = event::read()? else {
-            // Resize (and any other event): fall through and redraw with the new size.
-            continue;
-        };
-        if key.kind != KeyEventKind::Press {
-            continue;
-        }
-        if let Some(action) = keymap::action_for(key) {
-            // Expansion only exists in the graph view; the P0 text list has no
-            // detail pane, so ignore it there and keep the fallback untouched.
-            if action == Action::ToggleExpand && !show_graph {
-                continue;
+        match event::read()? {
+            Event::Key(key) if key.kind == KeyEventKind::Press => {
+                if state.menu_is_open() {
+                    // The overlay owns the keyboard until it closes (Esc).
+                    if let Some(nav) = keymap::menu_nav_for(key) {
+                        if state.menu_nav(nav) == MenuKey::Activated {
+                            state.activate_menu(&repo);
+                            flush_clipboard(&mut state)?;
+                        }
+                    }
+                    continue;
+                }
+                if show_graph && keymap::opens_menu(key) {
+                    state.open_menu_for_selection(0, 1);
+                    continue;
+                }
+                if let Some(action) = keymap::action_for(key) {
+                    // Expansion only exists in the graph view; the P0 text list
+                    // has no detail pane, so keep the fallback untouched.
+                    if action == Action::ToggleExpand && !show_graph {
+                        continue;
+                    }
+                    if reduce(&mut state, action, &repo) == Outcome::Quit {
+                        break;
+                    }
+                }
             }
-            if reduce(&mut state, action, &repo) == Outcome::Quit {
-                break;
+            // Mouse events only arrive while capture is on (graph mode).
+            Event::Mouse(mouse) if show_graph => {
+                let inside_menu = state
+                    .menu
+                    .as_ref()
+                    .map(|menu| menu.contains(mouse.column, mouse.row, screen))
+                    .unwrap_or(false);
+                match mouse.kind {
+                    MouseEventKind::Down(MouseButton::Right) => {
+                        if inside_menu {
+                            state.menu = None;
+                        } else {
+                            open_menu_at(&mut state, hit.as_ref(), mouse.column, mouse.row);
+                        }
+                    }
+                    MouseEventKind::Down(MouseButton::Left) if inside_menu => {
+                        // Click-to-activate: highlight the row under the pointer.
+                        let rect = state.menu.as_ref().map(|menu| menu.rect(screen));
+                        if let (Some(menu), Some(rect)) = (state.menu.as_mut(), rect) {
+                            let index = mouse.row.saturating_sub(rect.y).saturating_sub(1) as usize;
+                            if index < menu.items.len() {
+                                menu.selected = index;
+                            }
+                        }
+                        if state.menu_nav(MenuNav::Activate) == MenuKey::Activated {
+                            state.activate_menu(&repo);
+                            flush_clipboard(&mut state)?;
+                        }
+                    }
+                    MouseEventKind::Down(MouseButton::Left) => {
+                        if let Some(hit) = hit.as_ref() {
+                            if let Some(ClickTarget::Row(row, _, _)) =
+                                state.surface_at(mouse.column, mouse.row, hit)
+                            {
+                                state.selected = row;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
             }
+            // Resize (and any other event): redraw with the new size.
+            _ => {}
         }
     }
 
     // Stop borrowing the terminal before the guard restores the screen.
     drop(terminal);
     let _ = io::stdout().flush();
+    Ok(())
+}
+
+/// Open the menu for whatever the pointer is over, or close it on empty space.
+fn open_menu_at(state: &mut AppState, hit: Option<&app::HitGeometry>, x: u16, y: u16) {
+    let target = hit.and_then(|hit| state.surface_at(x, y, hit));
+    match target {
+        Some(ClickTarget::ColumnHeader) => {
+            state.open_menu(MenuSurface::ColumnHeader, None, x, y);
+        }
+        Some(ClickTarget::Row(row, surface, name)) => {
+            state.selected = row;
+            state.open_menu(surface, Some(&name), x, y);
+        }
+        None => state.menu = None,
+    }
+}
+
+/// Emit the pending OSC 52 clipboard write (opt-in via `GGT_OSC52=1`).
+///
+/// The dispatch map in [`actions`] always drops a copy of the text in the
+/// fallback clipboard file; this adds the terminal-escape path on top, and only
+/// when the user asked for it. Some terminals ignore OSC 52 and the sequence has
+/// no business in `--dump` output, so the default is "off".
+fn flush_clipboard(state: &mut AppState) -> io::Result<()> {
+    let Some(text) = state.pending_clipboard.take() else {
+        return Ok(());
+    };
+    let enabled = std::env::var("GGT_OSC52")
+        .map(|value| value == "1")
+        .unwrap_or(false);
+    if enabled {
+        actions::emit_osc52(&text)?;
+    }
     Ok(())
 }
 
