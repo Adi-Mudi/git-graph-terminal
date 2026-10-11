@@ -231,6 +231,8 @@ fn render_to_text(graph: &GraphLayout) -> String {
                     uncommitted: None,
                     scroll: 0,
                     colour: false,
+                    expanded: &HashSet::new(),
+                    detail_rows: 0,
                 },
                 area,
             );

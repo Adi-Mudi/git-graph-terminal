@@ -36,6 +36,7 @@ mod render {
     pub use crate::{cell, glyphs, graph_widget, mock};
 }
 
+use std::collections::HashSet;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -131,6 +132,8 @@ fn render_viewport_ms(graph: &layout::GraphLayout) -> u128 {
                     uncommitted: None,
                     scroll: 0,
                     colour: false,
+                    expanded: &HashSet::new(),
+                    detail_rows: 0,
                 },
                 area,
             );

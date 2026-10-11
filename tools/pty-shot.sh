@@ -4,6 +4,10 @@
 # Usage:   tools/pty-shot.sh [name]
 # Env:     ROWS (default 24)  COLS (default 80)  WAIT (seconds before 'q', default 1)
 #          MOCK=0 captures the current directory instead of the mock fixture
+#          KEYS   comma-separated keys/actions sent before 'q' (W4 nav evidence),
+#                 e.g. KEYS=j,j,down,right,enter,s
+#                 named keys: up down right left enter pgup pgdn home end esc
+#                 anything else is sent as a literal character
 #          ARGS   extra flags passed to the binary (e.g. ARGS=--text-list). When set,
 #                 the deterministic .frame step is skipped (the mode is interactive).
 #
@@ -26,6 +30,7 @@ COLS="${COLS:-80}"
 WAIT="${WAIT:-1}"
 MOCK="${MOCK:-1}"
 ARGS="${ARGS:-}"
+KEYS="${KEYS:-}"
 
 OUT="$ROOT/target/pty"
 mkdir -p "$OUT"
@@ -41,11 +46,40 @@ if [[ -n "$ARGS" ]]; then
   CMD="$CMD $ARGS"
 fi
 
-echo "== pty capture: ${COLS}x${ROWS} (name=$NAME, mock=$MOCK) =="
+echo "== pty capture: ${COLS}x${ROWS} (name=$NAME, mock=$MOCK, keys=${KEYS:-<none>}) =="
 
-# A pty at the requested size, then 'q' after WAIT seconds so the app exits cleanly.
-( sleep "$WAIT"; printf 'q' ) \
-  | timeout 10s script -q -c "$CMD" "$OUT/$NAME.raw" > /dev/null
+# Emit one key at a time with a small gap so the TUI redraws between presses.
+# Named keys become the crossterm escape sequences the app already handles.
+send_keys() {
+  local spec="$1"
+  local IFS=','
+  for token in $spec; do
+    case "$token" in
+      up)    printf '\033[A' ;;
+      down)  printf '\033[B' ;;
+      right) printf '\033[C' ;;
+      left)  printf '\033[D' ;;
+      enter|cr) printf '\r' ;;
+      pgup|pageup)     printf '\033[5~' ;;
+      pgdn|pagedown)   printf '\033[6~' ;;
+      home)  printf '\033[H' ;;
+      end)   printf '\033[F' ;;
+      esc)   printf '\033' ;;
+      *)     printf '%s' "$token" ;;
+    esac
+    sleep 0.15
+  done
+}
+
+# A pty at the requested size, then the scripted keys (if any) and 'q' after WAIT
+# seconds so the app exits cleanly.
+if [[ -n "$KEYS" ]]; then
+  ( sleep "$WAIT"; send_keys "$KEYS"; sleep 0.3; printf 'q' ) \
+    | timeout 15s script -q -c "$CMD" "$OUT/$NAME.raw" > /dev/null
+else
+  ( sleep "$WAIT"; printf 'q' ) \
+    | timeout 10s script -q -c "$CMD" "$OUT/$NAME.raw" > /dev/null
+fi
 
 # strings turns the escape-sequence stream into readable lines (stty + timeout + strings).
 strings -n 2 "$OUT/$NAME.raw" > "$OUT/$NAME.strings.txt"

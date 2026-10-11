@@ -11,8 +11,10 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Line;
 use ratatui::widgets::{Cell as TuiCell, Row as TuiRow, Table};
 
+use std::collections::HashSet;
+
 use crate::data::Commit;
-use crate::layout::types::Lane;
+use crate::layout::types::{Lane, RowIdx};
 use crate::render::cell::CELLS_PER_LANE;
 
 /// Screen column where the text columns start — `2 * max_lane + 2`.
@@ -42,38 +44,49 @@ pub fn header() -> TuiRow<'static> {
     }))
 }
 
-/// Build the commit table for `rows`, where `start_index` is the absolute index
-/// of `rows[0]` in the full commit list (used for the `idx` column and to decide
-/// which row is selected). `selected` is an absolute commit index.
-pub fn commits_table(
-    rows: &[Commit],
-    start_index: usize,
+/// Build the commit table for a **display-row window**.
+///
+/// `scroll` is the first display row shown at the top of the body; `expanded`
+/// rows occupy `1 + detail_rows` display rows, so `detail_rows` empty spacer
+/// rows are appended after them. That keeps table body line `d` aligned with
+/// graph display row `d` (both driven by the same `scroll`). `selected` is an
+/// absolute commit index (not a display row).
+pub fn commits_table_window(
+    commits: &[Commit],
+    expanded: &HashSet<RowIdx>,
+    detail_rows: u16,
+    scroll: u16,
     selected: Option<usize>,
 ) -> Table<'static> {
-    let body: Vec<TuiRow<'static>> = rows
-        .iter()
-        .enumerate()
-        .map(|(i, commit)| {
-            let idx = start_index + i;
-            let is_selected = selected == Some(idx);
-            let mut style = Style::default();
-            if is_selected {
-                style = style.add_modifier(Modifier::BOLD | Modifier::REVERSED);
-            }
-            let dim = Style::default().fg(Color::DarkGray);
-            let hash = Style::default().fg(Color::Yellow);
-            let date = Style::default().fg(Color::Green);
-            let refs = Style::default().fg(Color::Cyan);
+    let mut body: Vec<TuiRow<'static>> = Vec::new();
+    let mut cursor: u32 = 0; // display row at the top of the current commit
 
-            TuiRow::new(vec![
-                TuiCell::from(Line::styled(format!("{:>5}", idx + 1), dim)),
-                TuiCell::from(Line::styled(commit.abbrev.clone(), hash)),
-                TuiCell::from(Line::styled(short_date(commit.date), date)),
-                TuiCell::from(Line::styled(commit.subject.clone(), style)),
-                TuiCell::from(Line::styled(commit.refs.join(", "), refs)),
-            ])
-        })
-        .collect();
+    for (i, commit) in commits.iter().enumerate() {
+        let height = if expanded.contains(&(i as RowIdx)) {
+            1 + detail_rows as u32
+        } else {
+            1
+        };
+        let top = cursor;
+        cursor += height;
+        let scroll = scroll as u32;
+        if cursor <= scroll {
+            continue; // entirely above the viewport
+        }
+
+        // The row's own line is only shown when its top is in view; if it is
+        // scrolled halfway off, the visible part is spacer.
+        if top >= scroll {
+            body.push(commit_row(i, commit, selected));
+        }
+        if height > 1 {
+            let first_gap = top + 1;
+            let visible_from = first_gap.max(scroll);
+            for _ in 0..(cursor - visible_from) {
+                body.push(spacer_row());
+            }
+        }
+    }
 
     Table::new(
         body,
@@ -87,6 +100,31 @@ pub fn commits_table(
     )
     .header(header())
     .column_spacing(1)
+}
+
+/// One commit body row (absolute index `idx`).
+fn commit_row(idx: usize, commit: &Commit, selected: Option<usize>) -> TuiRow<'static> {
+    let mut style = Style::default();
+    if selected == Some(idx) {
+        style = style.add_modifier(Modifier::BOLD | Modifier::REVERSED);
+    }
+    let dim = Style::default().fg(Color::DarkGray);
+    let hash = Style::default().fg(Color::Yellow);
+    let date = Style::default().fg(Color::Green);
+    let refs = Style::default().fg(Color::Cyan);
+
+    TuiRow::new(vec![
+        TuiCell::from(Line::styled(format!("{:>5}", idx + 1), dim)),
+        TuiCell::from(Line::styled(commit.abbrev.clone(), hash)),
+        TuiCell::from(Line::styled(short_date(commit.date), date)),
+        TuiCell::from(Line::styled(commit.subject.clone(), style)),
+        TuiCell::from(Line::styled(commit.refs.join(", "), refs)),
+    ])
+}
+
+/// A blank spacer row for the reserved expansion gap.
+fn spacer_row() -> TuiRow<'static> {
+    TuiRow::new(vec![TuiCell::from("")])
 }
 
 /// Format a UNIX timestamp as an ISO-8601 UTC date (`YYYY-MM-DD`).
@@ -157,8 +195,63 @@ mod tests {
             commit("aaaaaaa", 0, "root", &[]),
             commit("bbbbbbb", 86_400, "tip", &["HEAD -> main"]),
         ];
-        let _ = commits_table(&rows, 0, Some(1));
-        let _ = commits_table(&rows, 5, None);
-        let _ = commits_table(&[], 0, None);
+        let no_expand = HashSet::new();
+        let _ = commits_table_window(&rows, &no_expand, 4, 0, Some(1));
+        let _ = commits_table_window(&rows, &no_expand, 4, 5, None);
+        let _ = commits_table_window(&[], &no_expand, 4, 0, None);
+    }
+
+    #[test]
+    fn expanded_rows_push_the_next_commit_down_in_the_table() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let rows = vec![
+            commit("aaaaaaa", 0, "root", &[]),
+            commit("bbbbbbb", 0, "mid", &[]),
+            commit("ccccccc", 0, "tip", &[]),
+        ];
+        let mut expanded = HashSet::new();
+        expanded.insert(1);
+
+        let render = |expanded: &HashSet<RowIdx>| -> Vec<String> {
+            let table = commits_table_window(&rows, expanded, 4, 0, Some(1));
+            let backend = TestBackend::new(60, 12);
+            let mut terminal =
+                Terminal::new(backend).unwrap_or_else(|e: std::convert::Infallible| match e {});
+            terminal
+                .draw(|frame| frame.render_widget(table, frame.area()))
+                .unwrap_or_else(|e: std::convert::Infallible| match e {});
+            let buffer = terminal.backend().buffer();
+            (0..buffer.area.height)
+                .map(|y| {
+                    (0..buffer.area.width)
+                        .map(|x| buffer[(x, y)].symbol().to_string())
+                        .collect::<String>()
+                })
+                .collect()
+        };
+
+        let collapsed = render(&HashSet::new());
+        let with_gap = render(&expanded);
+
+        let line_of = |lines: &[String], needle: &str| -> usize {
+            lines
+                .iter()
+                .position(|line| line.contains(needle))
+                .unwrap_or_else(|| panic!("missing {needle:?} in\n{lines:#?}"))
+        };
+
+        assert_eq!(line_of(&collapsed, "aaaaaaa"), 1);
+        assert_eq!(line_of(&collapsed, "bbbbbbb"), 2);
+        assert_eq!(line_of(&collapsed, "ccccccc"), 3);
+
+        assert_eq!(line_of(&with_gap, "aaaaaaa"), 1);
+        assert_eq!(line_of(&with_gap, "bbbbbbb"), 2);
+        assert_eq!(
+            line_of(&with_gap, "ccccccc"),
+            2 + 1 + 4,
+            "the expanded row reserves its four spacer rows"
+        );
     }
 }
