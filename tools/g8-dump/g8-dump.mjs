@@ -15,8 +15,9 @@
  *   node g8-dump.mjs --all
  *
  * Options:
- *   --fixture <name>   fixture repo under tests/fixtures/repos/<name> (repeatable)
- *   --all              every directory in tests/fixtures/repos
+ *   --fixture <name>   fixture under tests/fixtures/repos/<name> (repeatable, or a
+ *                      truncated-window fixture name — see TRUNCATED_WINDOWS)
+ *   --all              every directory in tests/fixtures/repos + every truncated fixture
  *   --stdout           print the JSON instead of writing it
  *   --out <dir>        output directory (default <repo>/tests/fixtures/golden)
  *   --repos <dir>      fixture repository directory (default <repo>/tests/fixtures/repos)
@@ -35,6 +36,30 @@ import { buildFixture } from './lib/extract-layout.mjs';
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 /** Worktree root (`tools/g8-dump/` -> up two levels). */
 const PROJECT_ROOT = path.resolve(HERE, '..', '..');
+
+/**
+ * Fixtures that are an existing repository loaded through a **smaller commit window**.
+ *
+ * The reference's `getCommits()` asks git for `maxCommits + 1` commits and drops the
+ * extra one (`src/dataSource.ts:167-172`), which is how the graph view pages history. A
+ * repository dumped with a window smaller than its history therefore leaves the commit
+ * at the boundary with a parent outside the loaded graph — `parents: [-1]`
+ * (`NULL_VERTEX_ID`, `web/graph.ts:2`).
+ *
+ * That boundary row is the **only reachable** form of the frozen `lane: -1` /
+ * `on_branch: false` sentinel: `loadCommits()` calls `determinePath()` for every vertex
+ * that has a next parent or is not yet on a branch (`web/graph.ts:427-434`), and
+ * `determinePath()`'s normal path always calls `addToBranch()` (`web/graph.ts:737`), so
+ * every vertex ends up on a branch. `Vertex.draw()`'s `onBranch === null` early return
+ * (`web/graph.ts:301`) is dead code for any commit list this harness can feed.
+ *
+ * See `src/layout/mod.rs` (reachability proof) and `tests/fixtures/golden/README.md`.
+ * `branch-merge-rebase` has 9 commits; a window of 6 puts rows 1 and 5 (whose parents
+ * are commit 8) at the boundary.
+ */
+const TRUNCATED_WINDOWS = {
+  'branch-merge-rebase-truncated': { repo: 'branch-merge-rebase', maxCommits: 6 },
+};
 
 /**
  * Minimal flag parser.
@@ -81,15 +106,15 @@ function resolveFixtureNames(reposDir, options) {
         `no fixture repositories at ${reposDir} — run \`npm run fixtures\` first`,
       );
     }
-    const names = fs
+    const repos = fs
       .readdirSync(reposDir, { withFileTypes: true })
       .filter((entry) => entry.isDirectory())
       .map((entry) => entry.name)
       .sort();
-    if (options.fixtures.length === 0 && names.length === 0) {
+    if (options.fixtures.length === 0 && repos.length === 0) {
       throw new Error(`no fixture repositories at ${reposDir} — run \`npm run fixtures\` first`);
     }
-    return names;
+    return [...repos, ...Object.keys(TRUNCATED_WINDOWS)].sort();
   }
   return options.fixtures;
 }
@@ -97,17 +122,21 @@ function resolveFixtureNames(reposDir, options) {
 /**
  * Dump one fixture.
  *
- * @param {string} name fixture name
+ * @param {string} name fixture name (a repository directory, or a key of
+ *   {@link TRUNCATED_WINDOWS})
  * @param {object} context resolved paths and the loaded reference module
  * @returns {object} the fixture object
  */
 function dumpFixture(name, context) {
-  const repoPath = path.join(context.reposDir, name);
+  const variant = TRUNCATED_WINDOWS[name];
+  const repoName = variant !== undefined ? variant.repo : name;
+  const maxCommits = variant !== undefined ? variant.maxCommits : undefined;
+  const repoPath = path.join(context.reposDir, repoName);
   if (!fs.existsSync(path.join(repoPath, '.git'))) {
     throw new Error(`missing fixture repository: ${repoPath} — run \`npm run fixtures\``);
   }
 
-  const { commits, commitHead, commitLookup } = readRepositoryCommits(repoPath);
+  const { commits, commitHead, commitLookup } = readRepositoryCommits(repoPath, maxCommits);
   if (commits.length === 0) {
     throw new Error(`fixture repository has no commits: ${repoPath}`);
   }
@@ -116,7 +145,7 @@ function dumpFixture(name, context) {
   return buildFixture({
     name,
     // Fixed, checkout-independent label: the golden file must not embed machine paths.
-    repoPathLabel: `tests/fixtures/repos/${name}`,
+    repoPathLabel: `tests/fixtures/repos/${repoName}`,
     commits,
     commitHead,
     commitLookup,

@@ -45,6 +45,7 @@ Single fixture / dry runs:
 
 ```bash
 node g8-dump.mjs --fixture linear --stdout                 # print, do not write
+node g8-dump.mjs --fixture branch-merge-rebase-truncated --stdout   # D4 sentinel fixture (parents: [-1])
 node g8-dump.mjs --all --check                             # verify committed goldens
 node g8-dump.mjs --all --repos /tmp/somewhere --out /tmp/g # other fixture set / output dir
 node g8-dump.mjs --help
@@ -63,6 +64,11 @@ node g8-dump.mjs --help
 | `parents` | parent vertex ids in `git` order; `-1` = `NULL_VERTEX_ID` = parent outside the loaded graph |
 | `lockedFirst` | row projection of `Line.lockedFirst`: `true` when a branch line leaving this row (`line.p1.y === row`) is locked to `p1`; `false` when the row has no outgoing line |
 
+The `lane: -1` and `colour: -1` cases above are documented for schema completeness, but
+`loadCommits()` never produces them for a repository commit list — see the note under
+*Fixture repositories*. The reachable form of the sentinel is `parents: [-1]`
+(`NULL_VERTEX_ID`), which `branch-merge-rebase-truncated` exercises.
+
 Additive extras (they do not change `rows`):
 
 - `rowNodes[]` — `isCurrent`, `isCommitted`, `isMerge`, `onBranch`
@@ -76,12 +82,34 @@ relative `repo.path` — as the D2 parity contract for W1 (2026-10-11, `p0-repor
 
 ## Fixture repositories
 
-Created by `make-fixtures.sh` under `tests/fixtures/repos/` (git-ignored, generated):
+Created by `make-fixtures.sh` under `tests/fixtures/repos/` (git-ignored, generated). Only
+the first two rows are repositories; the truncated fixture dumps an existing one again
+through a smaller commit window, so it needs no extra repo directory.
 
 | fixture | shape |
 | ------- | ----- |
 | `linear` | 5 commits on one branch, annotated tag `v1`, no merges → 1 lane, 1 colour index |
 | `branch-merge-rebase` | `main` (m1–m4) + `feature` forked at m1 (f1–f2) + a `--no-ff` merge into `main` + `rebase-like` forked at m1 (r1–r2), annotated tag `v2` → 9 commits, 3 lanes, one merge row, colour reuse |
+| `branch-merge-rebase-truncated` | the **same repository** as `branch-merge-rebase`, dumped through a 6-commit window (`TRUNCATED_WINDOWS` in `g8-dump.mjs`) → 6 rows, and rows 1/3/5 carry `parents: [-1]` (`NULL_VERTEX_ID`) because their parents fell outside the window |
+
+`branch-merge-rebase-truncated` exists for **D4**: it is the only way this harness can make
+the reference emit the parent-link sentinel. The reference asks git for `maxCommits + 1`
+commits and drops the extra one (`src/dataSource.ts:167-172`), so a repository dumped
+through a smaller window has commits whose parents are outside the loaded graph.
+
+The other half of the frozen sentinel — `lane: -1` / `on_branch: false` — is
+**unreachable**, so no fixture can exercise it. `loadCommits()` runs `determinePath()` for
+every vertex that has a next parent or is not yet on a branch (`web/graph.ts:433-439`), and
+both of that method's paths end with the start vertex on a branch: the normal path calls
+`addToBranch()` unconditionally (`web/graph.ts:733`) and the merge path is guarded by
+`!vertex.isNotOnBranch()` (`web/graph.ts:709`), i.e. that vertex is already on one. So every
+vertex ends up on a branch. `Vertex.draw()`'s `onBranch === null` early return
+(`web/graph.ts:301`) therefore never fires for a repository commit list. This was verified
+by running the reference's own `loadCommits()` over both fixture repositories with
+`onlyFollowFirstParent` both `false` and `true`, plus out-of-range-parent, `*` uncommitted,
+filtered-tail and two-root commit lists: 0 off-branch vertices in every case. See
+`src/layout/mod.rs` for the written proof and `tests/golden_layout.rs` for the canary that
+fails loudly if a future golden ever carries `lane: -1`.
 
 ### Determinism
 

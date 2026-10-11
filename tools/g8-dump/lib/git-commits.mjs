@@ -40,17 +40,24 @@ function git(repo, args) {
 /**
  * Raw commit records, newest first — the port of `getLog()`.
  *
+ * `maxCommits` mirrors the extension's `getCommits()` window: git is asked for
+ * `maxCommits + 1` commits and the extra one is dropped (`src/dataSource.ts:167-172`),
+ * exactly as the graph view does when it pages commits. Dumping a repository through a
+ * window smaller than its history therefore leaves the commit(s) at the window boundary
+ * with a parent outside the loaded graph — `parents: [-1]` (`NULL_VERTEX_ID`).
+ *
  * @param {string} repo repository path
+ * @param {number} [maxCommits] commit window (default {@link MAX_COMMITS})
  * @returns {Array<{hash: string, parents: string[], author: string, email: string, date: number, message: string}>}
  */
-export function getLog(repo) {
+export function getLog(repo, maxCommits = MAX_COMMITS) {
   // `dateType` default is the author date ("%at") — src/config.ts `get dateType`.
   const format = ['%H', '%P', '%an', '%ae', '%at', '%s'].join(GIT_LOG_SEPARATOR);
   const out = git(repo, [
     '-c',
     'log.showSignature=false',
     'log',
-    `--max-count=${MAX_COMMITS + 1}`,
+    `--max-count=${maxCommits + 1}`,
     `--format=${format}`,
     '--date-order',
     '--branches',
@@ -73,7 +80,7 @@ export function getLog(repo) {
       message: fields[5],
     });
   }
-  return commits.slice(0, MAX_COMMITS);
+  return commits.slice(0, maxCommits);
 }
 
 /**
@@ -117,10 +124,11 @@ export function getRefs(repo) {
  * `GitCommit[]` + lookup table for a repository, ready for `Graph.loadCommits()`.
  *
  * @param {string} repo repository path
+ * @param {number} [maxCommits] commit window (default {@link MAX_COMMITS})
  * @returns {{commits: Array<object>, commitHead: string|null, commitLookup: {[hash: string]: number}, refs: object}}
  */
-export function readRepositoryCommits(repo) {
-  const records = getLog(repo);
+export function readRepositoryCommits(repo, maxCommits = MAX_COMMITS) {
+  const records = getLog(repo, maxCommits);
   const refs = getRefs(repo);
 
   /** @type {{[hash: string]: number}} */
