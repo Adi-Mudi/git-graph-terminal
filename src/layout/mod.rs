@@ -25,6 +25,11 @@
 // `cargo clippy -- -D warnings` (CI) stays green in the scaffold.
 #![allow(dead_code)]
 
+// W1 shared contract types (`w1-plan_v1.0.md` §THE CONTRACT). Declared here so
+// lane b1 (renderer) can import `crate::layout::types::*`. a1 owns the rest of
+// this module and lands the identical `types.rs` in the same wave.
+pub mod types;
+
 /// Number of terminal cells per lane — D8 ruling `§3.1`.
 pub const CELLS_PER_LANE: usize = 2;
 
