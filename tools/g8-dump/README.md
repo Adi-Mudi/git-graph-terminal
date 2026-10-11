@@ -69,6 +69,9 @@ Additive extras (they do not change `rows`):
 - `reference.sha256` — hash of the exact `web/graph.ts` that produced the file
 - `repo.commitHashes` — fixture tip history, so a drift shows up as a readable diff
 
+**Frozen contract:** the PM accepted this schema — including the `lane: -1` sentinel and the
+relative `repo.path` — as the D2 parity contract for W1 (2026-10-11, `p0-report.md` §8).
+
 ## Fixture repositories
 
 Created by `make-fixtures.sh` under `tests/fixtures/repos/` (git-ignored, generated):

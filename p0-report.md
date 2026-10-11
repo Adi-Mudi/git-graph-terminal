@@ -225,19 +225,25 @@ directory yet (`tests/` holds fixtures).
    is not modelled: `stash: null`, `--max-count=1000`). Not required by the plan; it must be closed
    before the D2 parity gate can claim full parity.
 9. **`development` was not modified** and no push happened: `git log --oneline development..HEAD`
-   lists exactly the three `ggt-p0-setup` commits (T2 scaffold, T3 harness, T4 CI + this report);
+   lists only this branch's commits (T2 scaffold, T3 harness, T4 CI + report, decisions record);
    `development` still points at `e6330a8`. Worktree is clean after the final commit.
 10. **`.IDE_Plans/` was not edited** — the plan's own rules say "never edit `.IDE_Plans/`", which
     conflicts with the global rule that the worker updates plan status. Status therefore lives here.
 
 ## 8. Open questions / escalations
 
-1. **GitHub repository + remote** — needed for acceptance item 4's "remote-only E2E" and to activate
-   T4's CI. Create it, or is that still PM scope?
-2. **Golden schema acceptance** — confirm deviations 3–5 (additive fields, `lane: -1` sentinel,
-   `lockedFirst` row projection, relative `repo.path`) as the frozen D2 contract for W1.
-3. **Plan status file** — may I write the T1–T4 status into `.IDE_Plans/p0-plan_v1.0.md`, or does the
-   verifier/PM own that file (deviation 10)?
+**Resolved by PM, 2026-10-11:**
+
+1. **Plan status file** — the PM/verifier owns `.IDE_Plans/p0-plan_v1.0.md`; the worker does not
+   edit it (deviation 10 stands). Status stays in this report.
+2. **Golden schema** — deviations 3–5 (additive fields, `lane: -1` sentinel, `lockedFirst` row
+   projection, relative `repo.path`) are **accepted and frozen** as the D2 contract W1 ports
+   against; recorded in `tools/g8-dump/README.md`.
+3. **GitHub repository + remote** — stays dormant; escalation item 2 (money/account). T4's CI stays
+   committed but inactive until the user creates the repo, and remote-only E2E waits with it.
+
+**Still open:**
+
 4. **Fixture scope for M1** — is extending the harness to stashes, an unborn-branch repo and a
    ~30k-commit perf fixture part of the G8/D2 task, or a separate M1 task?
 5. **CI reference pinning** — for M1 should the reference checkout be vendored as a pinned submodule
