@@ -4,6 +4,8 @@
 # Usage:   tools/pty-shot.sh [name]
 # Env:     ROWS (default 24)  COLS (default 80)  WAIT (seconds before 'q', default 1)
 #          MOCK=0 captures the current directory instead of the mock fixture
+#          ARGS   extra flags passed to the binary (e.g. ARGS=--text-list). When set,
+#                 the deterministic .frame step is skipped (the mode is interactive).
 #
 # Allocates a real pty at ROWSxCOLS, drives the TUI, captures it, and writes four
 # artifacts under target/pty/ (git-ignored):
@@ -23,6 +25,7 @@ ROWS="${ROWS:-24}"
 COLS="${COLS:-80}"
 WAIT="${WAIT:-1}"
 MOCK="${MOCK:-1}"
+ARGS="${ARGS:-}"
 
 OUT="$ROOT/target/pty"
 mkdir -p "$OUT"
@@ -33,6 +36,9 @@ BIN="$ROOT/target/debug/git-graph-terminal"
 CMD="stty rows $ROWS cols $COLS; exec '$BIN'"
 if [[ "$MOCK" == "1" ]]; then
   CMD="$CMD --mock"
+fi
+if [[ -n "$ARGS" ]]; then
+  CMD="$CMD $ARGS"
 fi
 
 echo "== pty capture: ${COLS}x${ROWS} (name=$NAME, mock=$MOCK) =="
@@ -54,14 +60,18 @@ sed -e "s/${ESC}\\[[0-9;]*H/\n/g" \
     "$OUT/$NAME.raw" \
   | sed -e 's/[[:space:]]*$//' -e '/^$/d' > "$OUT/$NAME.txt"
 
-# Deterministic frame (no pty) so CI can assert the shot exactly.
-if [[ "$MOCK" == "1" ]]; then
+# Deterministic frame (no pty) so CI can assert the shot exactly. Skipped when ARGS
+# selects an interactive mode (`--text-list`), where `.txt` is the artifact.
+if [[ -n "$ARGS" ]]; then
+  echo "frame   -> (skipped: ARGS=$ARGS is interactive)"
+elif [[ "$MOCK" == "1" ]]; then
   "$BIN" --dump --mock > "$OUT/$NAME.frame"
+  echo "frame   -> target/pty/$NAME.frame"
 else
   "$BIN" --dump > "$OUT/$NAME.frame"
+  echo "frame   -> target/pty/$NAME.frame"
 fi
 
 echo "raw     -> target/pty/$NAME.raw"
 echo "shot    -> target/pty/$NAME.txt"
 echo "strings -> target/pty/$NAME.strings.txt"
-echo "frame   -> target/pty/$NAME.frame"
