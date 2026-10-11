@@ -13,6 +13,7 @@ use ratatui::widgets::{Cell as TuiCell, Row as TuiRow, Table};
 
 use std::collections::HashSet;
 
+use crate::app::ColumnState;
 use crate::data::Commit;
 use crate::layout::types::{Lane, RowIdx};
 use crate::render::cell::CELLS_PER_LANE;
@@ -22,19 +23,56 @@ pub fn text_offset(max_lane: Lane) -> u16 {
     (CELLS_PER_LANE * (max_lane as usize + 1)) as u16
 }
 
-/// Column headers, top to bottom of the text area.
-pub const HEADERS: [&str; 5] = ["idx", "hash", "date", "subject", "refs"];
+/// The table's fixed columns: the row number and the short hash. Everything
+/// else is toggled from the column-header menu for W5/T3.
+pub const FIXED_HEADERS: [&str; 2] = ["idx", "hash"];
+
+/// The header labels for the current [`ColumnState`].
+///
+/// Always `idx`, `hash`, `refs`; `date`, `author` and `subject` only when the
+/// corresponding column is visible.
+pub fn headers(columns: &ColumnState) -> Vec<&'static str> {
+    let mut out = vec![FIXED_HEADERS[0], FIXED_HEADERS[1]];
+    if columns.date {
+        out.push("date");
+    }
+    if columns.author {
+        out.push("author");
+    }
+    if columns.commit {
+        out.push("subject");
+    }
+    out.push("refs");
+    out
+}
+
+/// Column widths matching [`headers`], in the same order.
+pub fn constraints(columns: &ColumnState) -> Vec<ratatui::layout::Constraint> {
+    use ratatui::layout::Constraint::{Length, Min};
+    let mut out = vec![Length(5), Length(8)];
+    if columns.date {
+        out.push(Length(10));
+    }
+    if columns.author {
+        out.push(Length(12));
+    }
+    if columns.commit {
+        out.push(Min(12));
+    }
+    out.push(Length(20));
+    out
+}
 
 /// Header row for the table.
 ///
 /// The `idx` label is right-aligned so it sits over the right-aligned commit
 /// numbers instead of drifting to the left edge of the 5-cell column.
-pub fn header() -> TuiRow<'static> {
+pub fn header(columns: &ColumnState) -> TuiRow<'static> {
     let style = Style::default()
         .fg(Color::DarkGray)
         .add_modifier(Modifier::BOLD);
-    TuiRow::new(HEADERS.iter().enumerate().map(|(i, h)| {
-        let line = Line::styled(*h, style);
+    TuiRow::new(headers(columns).into_iter().enumerate().map(|(i, h)| {
+        let line = Line::styled(h, style);
         // Right-align only the label of the right-aligned `idx` column.
         TuiCell::from(if i == 0 {
             line.alignment(Alignment::Right)
@@ -50,13 +88,15 @@ pub fn header() -> TuiRow<'static> {
 /// rows occupy `1 + detail_rows` display rows, so `detail_rows` empty spacer
 /// rows are appended after them. That keeps table body line `d` aligned with
 /// graph display row `d` (both driven by the same `scroll`). `selected` is an
-/// absolute commit index (not a display row).
+/// absolute commit index (not a display row). `columns` carries the W5 column
+/// visibility toggles.
 pub fn commits_table_window(
     commits: &[Commit],
     expanded: &HashSet<RowIdx>,
     detail_rows: u16,
     scroll: u16,
     selected: Option<usize>,
+    columns: &ColumnState,
 ) -> Table<'static> {
     let mut body: Vec<TuiRow<'static>> = Vec::new();
     let mut cursor: u32 = 0; // display row at the top of the current commit
@@ -77,7 +117,7 @@ pub fn commits_table_window(
         // The row's own line is only shown when its top is in view; if it is
         // scrolled halfway off, the visible part is spacer.
         if top >= scroll {
-            body.push(commit_row(i, commit, selected));
+            body.push(commit_row(i, commit, selected, columns));
         }
         if height > 1 {
             let first_gap = top + 1;
@@ -88,22 +128,18 @@ pub fn commits_table_window(
         }
     }
 
-    Table::new(
-        body,
-        [
-            ratatui::layout::Constraint::Length(5),
-            ratatui::layout::Constraint::Length(8),
-            ratatui::layout::Constraint::Length(10),
-            ratatui::layout::Constraint::Min(12),
-            ratatui::layout::Constraint::Length(20),
-        ],
-    )
-    .header(header())
-    .column_spacing(1)
+    Table::new(body, constraints(columns))
+        .header(header(columns))
+        .column_spacing(1)
 }
 
 /// One commit body row (absolute index `idx`).
-fn commit_row(idx: usize, commit: &Commit, selected: Option<usize>) -> TuiRow<'static> {
+fn commit_row(
+    idx: usize,
+    commit: &Commit,
+    selected: Option<usize>,
+    columns: &ColumnState,
+) -> TuiRow<'static> {
     let mut style = Style::default();
     if selected == Some(idx) {
         style = style.add_modifier(Modifier::BOLD | Modifier::REVERSED);
@@ -111,15 +147,24 @@ fn commit_row(idx: usize, commit: &Commit, selected: Option<usize>) -> TuiRow<'s
     let dim = Style::default().fg(Color::DarkGray);
     let hash = Style::default().fg(Color::Yellow);
     let date = Style::default().fg(Color::Green);
+    let author = Style::default().fg(Color::Magenta);
     let refs = Style::default().fg(Color::Cyan);
 
-    TuiRow::new(vec![
+    let mut cells = vec![
         TuiCell::from(Line::styled(format!("{:>5}", idx + 1), dim)),
         TuiCell::from(Line::styled(commit.abbrev.clone(), hash)),
-        TuiCell::from(Line::styled(short_date(commit.date), date)),
-        TuiCell::from(Line::styled(commit.subject.clone(), style)),
-        TuiCell::from(Line::styled(commit.refs.join(", "), refs)),
-    ])
+    ];
+    if columns.date {
+        cells.push(TuiCell::from(Line::styled(short_date(commit.date), date)));
+    }
+    if columns.author {
+        cells.push(TuiCell::from(Line::styled(commit.author.clone(), author)));
+    }
+    if columns.commit {
+        cells.push(TuiCell::from(Line::styled(commit.subject.clone(), style)));
+    }
+    cells.push(TuiCell::from(Line::styled(commit.refs.join(", "), refs)));
+    TuiRow::new(cells)
 }
 
 /// A blank spacer row for the reserved expansion gap.
@@ -185,8 +230,25 @@ mod tests {
 
     #[test]
     fn header_names_all_five_columns() {
-        assert_eq!(HEADERS.len(), 5);
-        assert_eq!(HEADERS[4], "refs");
+        let headers = headers(&ColumnState::default());
+        assert_eq!(headers.len(), 6, "idx, hash, date, author, subject, refs");
+        assert_eq!(headers[0], FIXED_HEADERS[0]);
+        assert_eq!(headers[1], FIXED_HEADERS[1]);
+        assert_eq!(headers[5], "refs");
+    }
+
+    #[test]
+    fn hidden_columns_drop_their_header_and_width() {
+        let mut columns = ColumnState {
+            date: false,
+            author: false,
+            ..Default::default()
+        };
+        assert_eq!(headers(&columns), vec!["idx", "hash", "subject", "refs"]);
+        assert_eq!(constraints(&columns).len(), 4);
+        columns.commit = false;
+        assert_eq!(headers(&columns), vec!["idx", "hash", "refs"]);
+        assert_eq!(constraints(&columns).len(), 3);
     }
 
     #[test]
@@ -196,9 +258,10 @@ mod tests {
             commit("bbbbbbb", 86_400, "tip", &["HEAD -> main"]),
         ];
         let no_expand = HashSet::new();
-        let _ = commits_table_window(&rows, &no_expand, 4, 0, Some(1));
-        let _ = commits_table_window(&rows, &no_expand, 4, 5, None);
-        let _ = commits_table_window(&[], &no_expand, 4, 0, None);
+        let columns = ColumnState::default();
+        let _ = commits_table_window(&rows, &no_expand, 4, 0, Some(1), &columns);
+        let _ = commits_table_window(&rows, &no_expand, 4, 5, None, &columns);
+        let _ = commits_table_window(&[], &no_expand, 4, 0, None, &columns);
     }
 
     #[test]
@@ -215,7 +278,8 @@ mod tests {
         expanded.insert(1);
 
         let render = |expanded: &HashSet<RowIdx>| -> Vec<String> {
-            let table = commits_table_window(&rows, expanded, 4, 0, Some(1));
+            let table =
+                commits_table_window(&rows, expanded, 4, 0, Some(1), &ColumnState::default());
             let backend = TestBackend::new(60, 12);
             let mut terminal =
                 Terminal::new(backend).unwrap_or_else(|e: std::convert::Infallible| match e {});
