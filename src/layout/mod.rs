@@ -647,6 +647,20 @@ fn to_graph_layout(engine: &Engine) -> GraphLayout {
         max_lane = max_lane.max(vertex.x);
     }
 
+    // Bucket every branch line by the row it starts on in a single pass. The old
+    // shape re-scanned *all* branch lines for *every* row (O(rows × lines) — quadratic
+    // on a linear history). Each line still lands in exactly one row's segment list and
+    // branch/line order is preserved, so the output is byte-for-byte unchanged.
+    let mut lines_by_row: Vec<Vec<(Line, usize)>> = vec![Vec::new(); engine.vertices.len()];
+    for branch in &engine.branches {
+        for line in &branch.lines {
+            // Out-of-range rows were skipped by the old `continue`; keep that guard.
+            if let Some(bucket) = lines_by_row.get_mut(line.p1.y) {
+                bucket.push((*line, branch.colour));
+            }
+        }
+    }
+
     let mut rows = Vec::with_capacity(engine.vertices.len());
     for (row, vertex) in engine.vertices.iter().enumerate() {
         let vertex_ref = Some(VertexRef {
@@ -659,27 +673,22 @@ fn to_graph_layout(engine: &Engine) -> GraphLayout {
         });
 
         let mut segments = Vec::new();
-        for branch in &engine.branches {
-            for line in &branch.lines {
-                if line.p1.y != row {
-                    continue;
-                }
-                let pers = if line.locked_first {
-                    line.p1.x
-                } else {
-                    line.p2.x
-                };
-                max_lane = max_lane.max(line.p1.x).max(line.p2.x).max(pers);
-                segments.push(Segment {
-                    row_from: line.p1.y as RowIdx,
-                    row_to: line.p2.y as RowIdx,
-                    col_from: line.p1.x as Lane,
-                    col_to: line.p2.x as Lane,
-                    kind: segment_kind(line.p1, line.p2),
-                    colour_idx: branch.colour as u8,
-                    pers: pers as u8,
-                });
-            }
+        for (line, colour) in &lines_by_row[row] {
+            let pers = if line.locked_first {
+                line.p1.x
+            } else {
+                line.p2.x
+            };
+            max_lane = max_lane.max(line.p1.x).max(line.p2.x).max(pers);
+            segments.push(Segment {
+                row_from: line.p1.y as RowIdx,
+                row_to: line.p2.y as RowIdx,
+                col_from: line.p1.x as Lane,
+                col_to: line.p2.x as Lane,
+                kind: segment_kind(line.p1, line.p2),
+                colour_idx: *colour as u8,
+                pers: pers as u8,
+            });
         }
 
         rows.push(RowLayout {
