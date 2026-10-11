@@ -1,0 +1,11 @@
+[package]
+name = "git-graph-terminal"
+version = "0.1.0"
+edition = "2021"
+description = "Terminal commit-graph viewer (reverse-engineered from VS Code Git Graph)"
+publish = false
+
+[dependencies]
+crossterm = "0.29.0"
+ratatui = "0.30.2"
+
