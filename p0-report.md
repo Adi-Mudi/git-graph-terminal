@@ -105,8 +105,10 @@ topology contract). `Graph.determinePath()` runs implicitly inside `loadCommits(
 Commands and outputs:
 
 ```
-$ cd tools/g8-dump && npm install
-(npm warn EBADENGINE w3c-xmlserializer@6.0.0 wants node >=22.22.2 — see deviation 6)
+$ cd tools/g8-dump && npm ci
+(npm warn EBADENGINE ×5 on node 22.22.1 — jsdom@30.1.2, @asamuzakjp/css-color@7.1.5,
+ @asamuzakjp/dom-selector@9.2.4, w3c-xmlserializer@6.0.0 and g8-dump@0.1.0 itself;
+ all want ^22.22.2 || ^24.15.0 || >=26.0.0 — see deviation 6 and §11.2)
 $ npm ls --depth=0
 g8-dump@0.1.0 .../tools/g8-dump
 ├── jsdom@30.1.2
@@ -215,8 +217,12 @@ directory yet (`tests/` holds fixtures).
    the README output contract; the plan only said `int`/`bool`.
 5. **`repo.path` in the golden file is the fixed label `tests/fixtures/repos/<name>`**, not the
    absolute path — otherwise the golden file differs per machine and `--check` is useless.
-6. **npm emits `EBADENGINE`** for the transitive `w3c-xmlserializer@6.0.0` (wants node ≥ 22.22.2;
-   this machine has 22.22.1). Warning only: install and dumps work. CI/node should be ≥ 22.22.2.
+6. **npm emits `EBADENGINE`** for **4 packages** on node 22.22.1 — the direct devDependency
+   `jsdom@30.1.2`, its helpers `@asamuzakjp/css-color@7.1.5` and
+   `@asamuzakjp/dom-selector@9.2.4`, and the transitive `w3c-xmlserializer@6.0.0`; all want
+   `^22.22.2 || ^24.15.0 || >=26.0.0`. (This deviation originally named only
+   `w3c-xmlserializer`; corrected in §11.2.) Warning only: install and dumps work. CI/node
+   should be ≥ 22.22.2.
 7. **Scratch files were written under `/tmp/ggt-p0/`** (regenerated fixture copies, PTY harness +
    captured frames, edge-case and gate logs). This is outside the worktree and the plan says to work
    only inside it — disclosed deliberately. Nothing under `/tmp` is referenced by the committed
@@ -273,11 +279,115 @@ cargo run -q -- --dump .
 
 # G8 harness (acceptance 3, 4) — needs network (npm) + the reference at ../../../vscode-git-graph
 cd tools/g8-dump
-npm install
+npm ci
 npm run fixtures
 npm run dump
 npm run check          # must print "ok" twice and exit 0
 ```
 
 Fixture repositories are generated (git-ignored); the golden JSON files are committed and are the
-reviewable artifact. Full harness documentation: `tools/g8-dump/README.md`.
+reviewable artifact. Full harness documentation: `tools/g8-dump/README.md`. Use `npm ci`, not
+`npm install`: only `npm ci` installs the committed lockfile exactly and leaves the tree clean
+(§11.2, defect D1).
+
+## 11. P0.1 addendum — defect fixes after independent verification
+
+The independent verification (`p0-verify.md`, verifier `cline`, verdict ACCEPT with defects
+D1–D4) found three defects in this report's scope. They are fixed here; **D4** (no fixture
+exercises the `lane: -1` sentinel) is deliberately **not** touched — it needs a new fixture, i.e.
+a change to the frozen golden set, and the verifier itself recommended it as a W1 task.
+
+Commits on `ggt-p0-setup`, no push: `9233abc` (D3), `2ec4a79` (D1 + D2).
+
+### 11.1 D3 — `src/data.rs` selected refs the reference never shows (fixed)
+
+**What changed.** `commits()` used `git log --all`. `--all` walks *every* ref, including
+`refs/stash` and refs outside `refs/heads`, `refs/tags`, `refs/remotes` — in this worktree the
+agent harness's `refs/cline/checkpoints/1791711470014_g0jhr/1` added 2 commits that the branch
+does not have. The invocation now mirrors the reference `getLog()` "Show All" branch
+(`src/dataSource.ts:1509-1529`) with the extension's default settings
+(`showRemoteBranches` = true, `showTags` = true, `includeCommitsMentionedByReflogs` = false,
+`onlyFollowFirstParent` = false):
+
+| | invocation |
+| --- | --- |
+| before | `git -c log.showSignature=false log --all --date-order -z <fmt>` |
+| after | `git -c log.showSignature=false log --date-order -z <fmt> --branches --tags --remotes HEAD --` |
+
+`--tags` and `--remotes` are included because those are the reference's **defaults**
+(`git-graph.repository.showTags` / `showRemoteBranches` = `true` in `package.json`); the reflog
+flag and the stash base hashes are omitted because P0 has no reflog/stash model.
+
+**Evidence (this worktree, branch `ggt-p0-setup`).** Before/after `--dump` at `cc9417a` (the
+pre-fix tip, 7 branch commits), then again at the fix commits (9 branch commits):
+
+```
+$ git log --oneline ggt-p0-setup | wc -l   -> 7    (at cc9417a, before the fix)
+$ git log --all --oneline | wc -l          -> 9    (2 extra from refs/cline/checkpoints/...)
+$ cargo run -q -- --dump .   (before)  -> title "commits (9)", rows 1-2 = 74edbf8 / 7877e12
+$ cargo run -q -- --dump .   (after)   -> title "commits (7)", row 1 = cc9417a docs: record PM decisions ...
+$ cargo run -q -- --dump tests/fixtures/repos/branch-merge-rebase  -> still "commits (9)" (unchanged)
+
+# at the two fix commits (9233abc, 2ec4a79) the branch has 9 commits, --all still 11:
+$ git log --oneline ggt-p0-setup | wc -l   -> 9
+$ git log --all --oneline | wc -l          -> 11
+$ cargo run -q -- --dump .   -> title "commits (9)", rows 1-2 = 2ec4a79 / 9233abc,
+                                grep -c 'cline checkpoint|index on ggt-p0-setup' -> 0
+
+$ cargo test                            -> 7 passed; 0 failed (5 existing + 2 new)
+$ cargo fmt --check ; cargo clippy --all-targets -- -D warnings   -> exit 0
+```
+
+New unit tests: `data::tests::stray_refs_and_stashes_are_not_shown` (creates
+`refs/cline/checkpoints/...` and `refs/stash` in a scratch repo, proves `--all` reaches both, then
+asserts `commits()` returns only the branch commits) and
+`data::tests::tag_and_remote_only_commits_are_shown` (tag-only and remote-only commits are still
+shown). The golden fixtures are untouched: `npm run check` prints `ok` twice.
+
+**Flag differences found against `getLog()` (report only — not changed here).**
+
+| # | `getLog()` (defaults) | ours | note |
+| --- | --- | --- | --- |
+| 1 | `--max-count=<num>` always passed; the view calls it with `initialLoadCommits + 1` = **301** (default 300), then pops the extra row to set `moreCommitsAvailable` | no `--max-count` | our list is unbounded; a 30k-commit repo loads everything (G5/M1 concern) |
+| 2 | splits stdout on `EOL_REGEX`, fields on `GIT_LOG_SEPARATOR` (6 fields) | `-z` + NUL records, 7 fields (`%D` refs added) | deliberate: newlines in a subject cannot break records; the reference's own split would. Keep. |
+| 3 | `--first-parent` only when `onlyFollowFirstParent` (default false) | not passed | matches default |
+| 4 | `--reflog` only when `includeCommitsMentionedByReflogs` (default false) | not passed | matches default |
+| 5 | with hidden remotes: one `--glob=refs/remotes/<remote>` per visible remote instead of `--remotes` | always `--remotes` | no remote filter UI in P0 |
+| 6 | appends each distinct stash `baseHash` before `HEAD`, so commits reachable only from a stash still appear | none | P0 has no stash model; documented deviation |
+| 7 | trailing `--` | trailing `--` (added) | options now precede it, as `git` requires |
+| 8 | `-c log.showSignature=false`, `--date-order` (`--<commitOrdering>-order`, default `date`), `HEAD` | same | parity |
+
+### 11.2 D1 + D2 — `tools/g8-dump/` install docs (fixed)
+
+**D1 (tree not clean).** Every documented command now uses `npm ci`: the exact re-run block, the
+one-liner, §10 above and the README. `npm install` had rewritten the committed
+`package-lock.json` (it re-added the root `engines` block once `engines` existed in
+`package.json`), so the mandated re-run left ` M tools/g8-dump/package-lock.json` behind. The lock
+is re-committed and now matches `package.json` exactly: `npm install --package-lock-only` produces
+**no** further diff.
+
+```
+$ rm -rf tools/g8-dump/node_modules && cd tools/g8-dump && npm ci   -> exit 0, "added 37 packages"
+$ npm install --package-lock-only ; git diff --stat                -> only the engines line, no further rewrite
+$ cd tools/g8-dump && npm ci && npm run fixtures && npm run dump && npm run check
+                                                                   -> exit 0; "ok" for both fixtures
+$ git status --porcelain                                           -> empty (tree clean)
+```
+
+**D2 (warnings understated).** The README Requirements/Notes and deviation 6 above now name all
+**4** packages that warn on node 22.22.1 — `jsdom@30.1.2` (a *direct* devDependency),
+`@asamuzakjp/css-color@7.1.5`, `@asamuzakjp/dom-selector@9.2.4`, `w3c-xmlserializer@6.0.0` — all
+declaring `node: ^22.22.2 || ^24.15.0 || >=26.0.0`. No version was pinned or downgraded: the
+goldens were produced with `jsdom@30.1.2`, so changing it would invalidate the parity evidence,
+and no pin removes the warning anyway (the requirement comes from jsdom's own `engines`). Instead
+`tools/g8-dump/package.json` now declares the same range as jsdom, which makes the requirement
+explicit — and on this machine (22.22.1) `npm ci` therefore prints **5** `EBADENGINE` warnings:
+those 4 packages plus `g8-dump@0.1.0` itself. They are warnings only:
+
+```
+$ grep -c 'EBADENGINE Unsupported engine' <npm ci log>   -> 5
+$ npm ci ; npm run fixtures ; npm run dump ; npm run check  -> all exit 0, goldens byte-identical
+```
+
+Remedy documented in the README: node ≥ 22.22.2 (or ≥ 24.15.0, or ≥ 26.0.0) clears every warning;
+CI should pin such a version.
