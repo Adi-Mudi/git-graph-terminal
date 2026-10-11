@@ -1,12 +1,16 @@
-//! git-graph-terminal — P0 scaffold.
+//! git-graph-terminal — TUI scaffold with a graph renderer (W1 / lane b1).
 //!
-//! Event loop + terminal setup/teardown (alternate screen, raw mode) and a status
-//! bar, over the commit list from [`data`]. The graph grid itself is W1 work
-//! (see [`layout`]).
+//! Event loop + terminal setup/teardown (alternate screen, raw mode), the graph
+//! renderer in [`render`], and a status bar over the commit data from [`data`].
+//! The layout *engine* (`layout()` → [`GraphLayout`]) is lane a1's W1 work; until
+//! it merges, `--mock` draws the hand-built fixture from [`render::mock`] so the
+//! renderer is exercised end to end without a1's code.
 //!
-//! Usage: `git-graph-terminal [REPO]` (default `.`).
-//! `git-graph-terminal --dump [REPO]` prints one rendered frame to stdout and
-//! exits — used for headless verification (no PTY needed).
+//! Usage:
+//! * `git-graph-terminal [REPO]` (default `.`) — text list (no layout engine yet).
+//! * `git-graph-terminal --mock [REPO]` — graph view on the mock fixture.
+//! * `git-graph-terminal --dump [REPO]` — print one frame to stdout and exit
+//!   (headless verification; combine with `--mock`).
 
 mod data;
 mod layout;
@@ -25,6 +29,9 @@ use ratatui::widgets::ListState;
 use ratatui::Terminal;
 
 use crate::data::Commit;
+use crate::layout::types::GraphLayout;
+use crate::render::glyphs::GlyphTier;
+use crate::render::ViewOptions;
 
 /// Application state for the P0 view.
 pub struct App {
@@ -74,6 +81,30 @@ impl App {
             Err(_) => {}
         }
         app
+    }
+
+    /// The `--mock` view: the hand-built fixture from [`render::mock`], so the
+    /// renderer can be smoke-tested before lane a1's `layout()` lands.
+    pub fn demo() -> Self {
+        Self {
+            repo: PathBuf::from("(mock)"),
+            branch: Some("main".to_string()),
+            head: Some("a1b2c3d".to_string()),
+            branches: vec![
+                data::Branch {
+                    name: "main".to_string(),
+                    head: "a1b2c3d".to_string(),
+                    is_current: true,
+                },
+                data::Branch {
+                    name: "feature/graph".to_string(),
+                    head: "c3d4e5f".to_string(),
+                    is_current: false,
+                },
+            ],
+            commits: render::mock::demo_commits(),
+            error: None,
+        }
     }
 
     /// Repository path as shown in the UI (never an absolute server path — Rule 10).
@@ -150,15 +181,36 @@ fn restore_terminal() -> io::Result<()> {
 fn main() -> io::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let dump = args.iter().any(|a| a == "--dump");
+    let mock = args.iter().any(|a| a == "--mock");
     let repo = args
         .iter()
         .find(|a| !a.starts_with('-'))
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."));
 
-    let mut app = App::load(&repo);
+    let mut app = if mock { App::demo() } else { App::load(&repo) };
+
+    // Capability tier + colour come from the environment (G2 minimal ladder).
+    let tier = GlyphTier::detect_from_os();
+    let colour = render::glyphs::colour_enabled_os();
+    // The layout engine is lane a1's W1 deliverable; `--mock` stands in for it.
+    let graph: Option<GraphLayout> = mock.then(render::mock::demo_layout);
+    let view = match graph.as_ref() {
+        Some(layout) => ViewOptions {
+            graph: Some(layout),
+            tier,
+            colour,
+            uncommitted: Some(0),
+        },
+        None => ViewOptions {
+            tier,
+            colour,
+            ..ViewOptions::TEXT_ONLY
+        },
+    };
+
     if dump {
-        return dump_frame(&app);
+        return dump_frame(&app, &view);
     }
 
     let mut terminal = setup_terminal()?;
@@ -169,7 +221,7 @@ fn main() -> io::Result<()> {
     }
 
     loop {
-        terminal.draw(|frame| render::ui(frame, &app, &mut list_state))?;
+        terminal.draw(|frame| render::ui(frame, &app, &mut list_state, &view))?;
 
         if !event::poll(Duration::from_millis(250))? {
             continue;
@@ -197,7 +249,7 @@ fn main() -> io::Result<()> {
             }
             KeyCode::Char('r') => {
                 let selected = list_state.selected();
-                app = App::load(&repo);
+                app = if mock { App::demo() } else { App::load(&repo) };
                 list_state.select(selected.filter(|i| *i < app.commits.len()).or(
                     if app.commits.is_empty() {
                         None
@@ -217,8 +269,13 @@ fn main() -> io::Result<()> {
 }
 
 /// Headless verification path: render one frame into a test backend and print it.
-fn dump_frame(app: &App) -> io::Result<()> {
-    let backend = ratatui::backend::TestBackend::new(100, 12);
+///
+/// The text view keeps P0's 100-column frame exactly. The graph view is dumped
+/// wider so the whole status bar (repo + branch + head + counts + lanes + key
+/// hints) fits on one line for review.
+fn dump_frame(app: &App, view: &ViewOptions<'_>) -> io::Result<()> {
+    let width = if view.graph.is_some() { 140 } else { 100 };
+    let backend = ratatui::backend::TestBackend::new(width, 12);
     // `TestBackend` cannot fail; its error type is `Infallible`.
     let mut terminal =
         Terminal::new(backend).unwrap_or_else(|e: std::convert::Infallible| match e {});
@@ -227,7 +284,7 @@ fn dump_frame(app: &App) -> io::Result<()> {
         list_state.select(Some(0));
     }
     terminal
-        .draw(|frame| render::ui(frame, app, &mut list_state))
+        .draw(|frame| render::ui(frame, app, &mut list_state, view))
         .unwrap_or_else(|e: std::convert::Infallible| match e {});
 
     let buffer = terminal.backend().buffer();
