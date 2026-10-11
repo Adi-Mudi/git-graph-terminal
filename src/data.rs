@@ -169,8 +169,23 @@ pub fn head(repo: &Path) -> Result<Head, GitError> {
     Ok(Head { branch, hash })
 }
 
-/// All commits reachable from any ref, newest first (`--date-order`, the same
-/// default ordering the reference uses for the graph).
+/// All commits reachable from the refs the reference would show, newest first
+/// (`--date-order`, the same default ordering the reference uses for the graph).
+///
+/// Mirrors the reference `getLog()` "Show All" ref selection
+/// (`src/dataSource.ts:1510-1527`) with the extension's **default** settings
+/// (`showRemoteBranches` = true, `showTags` = true,
+/// `includeCommitsMentionedByReflogs` = false, `onlyFollowFirstParent` = false):
+///
+/// ```text
+/// --branches [--tags] [--reflog] [--remotes] <stash base hashes...> HEAD --
+/// ```
+///
+/// `--branches --tags --remotes HEAD --` is used here; the reflog flag and the stash
+/// base hashes are omitted because P0 does not model stashes. Deliberately **not**
+/// `--all`: that also walks `refs/stash` and any ref outside `refs/heads`,
+/// `refs/tags`, `refs/remotes` — e.g. agent checkpoint refs like
+/// `refs/cline/checkpoints/...` — which the reference never shows.
 ///
 /// A repository without commits (unborn branch) yields an empty list — not an
 /// error, per the T2 contract.
@@ -187,10 +202,15 @@ pub fn commits(repo: &Path) -> Result<Vec<Commit>, GitError> {
             "-c",
             "log.showSignature=false",
             "log",
-            "--all",
             "--date-order",
             "-z",
             LOG_FORMAT,
+            "--branches",
+            "--tags",
+            "--remotes",
+            "HEAD",
+            // Options must precede this separator; everything after it is a path.
+            "--",
         ],
     )?;
     Ok(parse_log(&out))
@@ -294,6 +314,102 @@ mod tests {
         let head = head(&dir).expect("head");
         assert!(head.hash.is_none());
         assert!(branches(&dir).expect("branches").is_empty());
+
+        fs::remove_dir_all(&dir).expect("clean temp dir");
+    }
+
+    /// Create a scratch repo with pinned identity and two commits on `main`.
+    ///
+    /// Returns `(dir, [root hash, tip hash])`. The caller removes `dir`.
+    fn temp_repo(tag: &str) -> (PathBuf, Vec<String>) {
+        let dir: PathBuf = std::env::temp_dir().join(format!(
+            "ggt-p0-{tag}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("create temp dir");
+        run_git(&dir, &["init", "-q", "-b", "main"]).expect("git init");
+        run_git(&dir, &["config", "user.name", "Test"]).expect("config name");
+        run_git(&dir, &["config", "user.email", "test@example.invalid"]).expect("config email");
+        run_git(&dir, &["config", "commit.gpgsign", "false"]).expect("config gpgsign");
+        fs::write(dir.join("f.txt"), "1\n").expect("write file");
+        run_git(&dir, &["add", "f.txt"]).expect("git add");
+        run_git(&dir, &["commit", "-q", "-m", "c1 root"]).expect("git commit 1");
+        fs::write(dir.join("f.txt"), "2\n").expect("write file");
+        run_git(&dir, &["commit", "-q", "-am", "c2 tip"]).expect("git commit 2");
+        let hashes = run_git(&dir, &["log", "--format=%H"]).expect("log hashes");
+        let hashes: Vec<String> = hashes.lines().map(|h| h.trim().to_string()).collect();
+        assert_eq!(hashes.len(), 2);
+        (dir, hashes)
+    }
+
+    /// A dangling commit (own root, no parents) reachable from no branch.
+    fn dangling_commit(dir: &Path, subject: &str) -> String {
+        let tree = run_git(dir, &["rev-parse", "HEAD^{tree}"]).expect("tree");
+        run_git(dir, &["commit-tree", tree.trim(), "-m", subject])
+            .expect("commit-tree")
+            .trim()
+            .to_string()
+    }
+
+    #[test]
+    fn stray_refs_and_stashes_are_not_shown() {
+        // D3: `git log --all` leaked agent-harness checkpoint refs and refs/stash into
+        // the view. The reference selects `--branches [--tags] [--remotes] HEAD --`.
+        let (dir, commits_expected) = temp_repo("stray");
+        let stray = dangling_commit(&dir, "checkpoint, not on any branch");
+        let stashed = dangling_commit(&dir, "stash-only commit");
+        run_git(&dir, &["update-ref", "refs/cline/checkpoints/s1/1", &stray]).expect("update-ref");
+        run_git(&dir, &["update-ref", "refs/stash", &stashed]).expect("update-ref stash");
+
+        // Sanity: both refs are really there and `--all` (the old invocation) sees them.
+        let all = run_git(&dir, &["log", "--all", "--format=%H"]).expect("log --all");
+        assert!(
+            all.contains(&stray),
+            "precondition: --all reaches the checkpoint"
+        );
+        assert!(
+            all.contains(&stashed),
+            "precondition: --all reaches the stash"
+        );
+
+        let got: Vec<String> = commits(&dir)
+            .expect("commits")
+            .into_iter()
+            .map(|c| c.hash)
+            .collect();
+        assert_eq!(got, commits_expected);
+        assert!(!got.contains(&stray), "checkpoint ref must not be shown");
+        assert!(!got.contains(&stashed), "refs/stash must not be shown");
+
+        fs::remove_dir_all(&dir).expect("clean temp dir");
+    }
+
+    #[test]
+    fn tag_and_remote_only_commits_are_shown() {
+        // Reference defaults are showTags = true and showRemoteBranches = true, so
+        // `--branches --tags --remotes HEAD --` must reach both.
+        let (dir, _) = temp_repo("tags");
+        let tagged = dangling_commit(&dir, "tag only");
+        let remote_only = dangling_commit(&dir, "remote branch only");
+        run_git(&dir, &["update-ref", "refs/tags/v9", &tagged]).expect("tag ref");
+        run_git(
+            &dir,
+            &["update-ref", "refs/remotes/origin/feature", &remote_only],
+        )
+        .expect("remote ref");
+
+        let got: Vec<String> = commits(&dir)
+            .expect("commits")
+            .into_iter()
+            .map(|c| c.hash)
+            .collect();
+        assert!(got.contains(&tagged), "tag-only commit must be shown");
+        assert!(
+            got.contains(&remote_only),
+            "remote-only commit must be shown"
+        );
 
         fs::remove_dir_all(&dir).expect("clean temp dir");
     }
