@@ -1,0 +1,183 @@
+{
+  "fixture": "linear",
+  "generatedBy": "tools/g8-dump (P0 T3 seed)",
+  "reference": {
+    "repo": "vscode-git-graph",
+    "file": "web/graph.ts",
+    "sha256": "86a667151fcef285213e3059bcf460df5cfb8b77111f0f9c414f57c25850e4e9",
+    "method": "Graph.loadCommits() -> Graph.determinePath()"
+  },
+  "config": {
+    "grid": {
+      "x": 16,
+      "y": 24,
+      "offsetX": 16,
+      "offsetY": 12,
+      "expandY": 250
+    },
+    "style": "rounded",
+    "uncommittedChanges": "OpenCircleAtTheUncommittedChanges",
+    "colours": [
+      "#0085d9",
+      "#d9008f",
+      "#00d90a",
+      "#d98500",
+      "#a300d9",
+      "#ff0000",
+      "#00d9cc",
+      "#e138e8",
+      "#85d900",
+      "#dc5b23",
+      "#6f24d6",
+      "#ffcc00"
+    ]
+  },
+  "repo": {
+    "name": "linear",
+    "path": "tests/fixtures/repos/linear",
+    "commitHead": "65e070ec3be16c3006fd3dc7f21c571829b4a72b",
+    "commitCount": 5,
+    "commitHashes": [
+      "65e070ec3be16c3006fd3dc7f21c571829b4a72b",
+      "c1bcb31c2770658ea27e8626b5baf31f90c439ae",
+      "902a50b094b4df790c9e6e93cc2dd96c34d2bfda",
+      "4bc86c04e0173b61df5336da56987e7aeed03c8e",
+      "a2ee9159f99e112cdcf827c66acbb9b975b372ca"
+    ]
+  },
+  "rows": [
+    {
+      "row": 0,
+      "lane": 0,
+      "colour": 0,
+      "parents": [
+        1
+      ],
+      "lockedFirst": false
+    },
+    {
+      "row": 1,
+      "lane": 0,
+      "colour": 0,
+      "parents": [
+        2
+      ],
+      "lockedFirst": false
+    },
+    {
+      "row": 2,
+      "lane": 0,
+      "colour": 0,
+      "parents": [
+        3
+      ],
+      "lockedFirst": false
+    },
+    {
+      "row": 3,
+      "lane": 0,
+      "colour": 0,
+      "parents": [
+        4
+      ],
+      "lockedFirst": false
+    },
+    {
+      "row": 4,
+      "lane": 0,
+      "colour": 0,
+      "parents": [],
+      "lockedFirst": false
+    }
+  ],
+  "rowNodes": [
+    {
+      "row": 0,
+      "isCurrent": true,
+      "isCommitted": true,
+      "isMerge": false,
+      "onBranch": true
+    },
+    {
+      "row": 1,
+      "isCurrent": false,
+      "isCommitted": true,
+      "isMerge": false,
+      "onBranch": true
+    },
+    {
+      "row": 2,
+      "isCurrent": false,
+      "isCommitted": true,
+      "isMerge": false,
+      "onBranch": true
+    },
+    {
+      "row": 3,
+      "isCurrent": false,
+      "isCommitted": true,
+      "isMerge": false,
+      "onBranch": true
+    },
+    {
+      "row": 4,
+      "isCurrent": false,
+      "isCommitted": true,
+      "isMerge": false,
+      "onBranch": true
+    }
+  ],
+  "branches": [
+    {
+      "colour": 0,
+      "end": 4,
+      "numUncommitted": 0,
+      "lines": [
+        {
+          "p1": {
+            "x": 0,
+            "y": 0
+          },
+          "p2": {
+            "x": 0,
+            "y": 1
+          },
+          "lockedFirst": false
+        },
+        {
+          "p1": {
+            "x": 0,
+            "y": 1
+          },
+          "p2": {
+            "x": 0,
+            "y": 2
+          },
+          "lockedFirst": false
+        },
+        {
+          "p1": {
+            "x": 0,
+            "y": 2
+          },
+          "p2": {
+            "x": 0,
+            "y": 3
+          },
+          "lockedFirst": false
+        },
+        {
+          "p1": {
+            "x": 0,
+            "y": 3
+          },
+          "p2": {
+            "x": 0,
+            "y": 4
+          },
+          "lockedFirst": false
+        }
+      ]
+    }
+  ]
+}

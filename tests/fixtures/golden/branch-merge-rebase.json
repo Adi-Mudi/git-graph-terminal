@@ -1,0 +1,442 @@
+{
+  "fixture": "branch-merge-rebase",
+  "generatedBy": "tools/g8-dump (P0 T3 seed)",
+  "reference": {
+    "repo": "vscode-git-graph",
+    "file": "web/graph.ts",
+    "sha256": "86a667151fcef285213e3059bcf460df5cfb8b77111f0f9c414f57c25850e4e9",
+    "method": "Graph.loadCommits() -> Graph.determinePath()"
+  },
+  "config": {
+    "grid": {
+      "x": 16,
+      "y": 24,
+      "offsetX": 16,
+      "offsetY": 12,
+      "expandY": 250
+    },
+    "style": "rounded",
+    "uncommittedChanges": "OpenCircleAtTheUncommittedChanges",
+    "colours": [
+      "#0085d9",
+      "#d9008f",
+      "#00d90a",
+      "#d98500",
+      "#a300d9",
+      "#ff0000",
+      "#00d9cc",
+      "#e138e8",
+      "#85d900",
+      "#dc5b23",
+      "#6f24d6",
+      "#ffcc00"
+    ]
+  },
+  "repo": {
+    "name": "branch-merge-rebase",
+    "path": "tests/fixtures/repos/branch-merge-rebase",
+    "commitHead": "7009c4ea3bb8dae10a78c411b8a9d6cf6a94a337",
+    "commitCount": 9,
+    "commitHashes": [
+      "2dea24e15aac63ba840504ad67fdc3e35049538f",
+      "5eb1c2770c9725e1ade12e650e8d00e8ace7ec8d",
+      "7009c4ea3bb8dae10a78c411b8a9d6cf6a94a337",
+      "852a99fd40b12af0a40647b2c9283f68a598befc",
+      "88ab47cca265126ffd06c2fa1c4ba29ccbb9629b",
+      "8f291425f75971023d4e639613e2ad7e387c137d",
+      "dbcc4ae5ef0c867a02ddabc3a0f4f1257d524177",
+      "af4db49869d7f8f59c5104cc82928d8a34379d1e",
+      "b95a8a72f682cfda7940b6ddb58c49076dba5231"
+    ]
+  },
+  "rows": [
+    {
+      "row": 0,
+      "lane": 0,
+      "colour": 0,
+      "parents": [
+        1
+      ],
+      "lockedFirst": false
+    },
+    {
+      "row": 1,
+      "lane": 0,
+      "colour": 0,
+      "parents": [
+        8
+      ],
+      "lockedFirst": false
+    },
+    {
+      "row": 2,
+      "lane": 1,
+      "colour": 1,
+      "parents": [
+        3,
+        4
+      ],
+      "lockedFirst": true
+    },
+    {
+      "row": 3,
+      "lane": 1,
+      "colour": 1,
+      "parents": [
+        6
+      ],
+      "lockedFirst": false
+    },
+    {
+      "row": 4,
+      "lane": 2,
+      "colour": 2,
+      "parents": [
+        5
+      ],
+      "lockedFirst": false
+    },
+    {
+      "row": 5,
+      "lane": 2,
+      "colour": 2,
+      "parents": [
+        8
+      ],
+      "lockedFirst": false
+    },
+    {
+      "row": 6,
+      "lane": 1,
+      "colour": 1,
+      "parents": [
+        7
+      ],
+      "lockedFirst": false
+    },
+    {
+      "row": 7,
+      "lane": 1,
+      "colour": 1,
+      "parents": [
+        8
+      ],
+      "lockedFirst": false
+    },
+    {
+      "row": 8,
+      "lane": 0,
+      "colour": 0,
+      "parents": [],
+      "lockedFirst": false
+    }
+  ],
+  "rowNodes": [
+    {
+      "row": 0,
+      "isCurrent": false,
+      "isCommitted": true,
+      "isMerge": false,
+      "onBranch": true
+    },
+    {
+      "row": 1,
+      "isCurrent": false,
+      "isCommitted": true,
+      "isMerge": false,
+      "onBranch": true
+    },
+    {
+      "row": 2,
+      "isCurrent": true,
+      "isCommitted": true,
+      "isMerge": true,
+      "onBranch": true
+    },
+    {
+      "row": 3,
+      "isCurrent": false,
+      "isCommitted": true,
+      "isMerge": false,
+      "onBranch": true
+    },
+    {
+      "row": 4,
+      "isCurrent": false,
+      "isCommitted": true,
+      "isMerge": false,
+      "onBranch": true
+    },
+    {
+      "row": 5,
+      "isCurrent": false,
+      "isCommitted": true,
+      "isMerge": false,
+      "onBranch": true
+    },
+    {
+      "row": 6,
+      "isCurrent": false,
+      "isCommitted": true,
+      "isMerge": false,
+      "onBranch": true
+    },
+    {
+      "row": 7,
+      "isCurrent": false,
+      "isCommitted": true,
+      "isMerge": false,
+      "onBranch": true
+    },
+    {
+      "row": 8,
+      "isCurrent": false,
+      "isCommitted": true,
+      "isMerge": false,
+      "onBranch": true
+    }
+  ],
+  "branches": [
+    {
+      "colour": 0,
+      "end": 8,
+      "numUncommitted": 0,
+      "lines": [
+        {
+          "p1": {
+            "x": 0,
+            "y": 0
+          },
+          "p2": {
+            "x": 0,
+            "y": 1
+          },
+          "lockedFirst": false
+        },
+        {
+          "p1": {
+            "x": 0,
+            "y": 1
+          },
+          "p2": {
+            "x": 0,
+            "y": 2
+          },
+          "lockedFirst": false
+        },
+        {
+          "p1": {
+            "x": 0,
+            "y": 2
+          },
+          "p2": {
+            "x": 0,
+            "y": 3
+          },
+          "lockedFirst": false
+        },
+        {
+          "p1": {
+            "x": 0,
+            "y": 3
+          },
+          "p2": {
+            "x": 0,
+            "y": 4
+          },
+          "lockedFirst": false
+        },
+        {
+          "p1": {
+            "x": 0,
+            "y": 4
+          },
+          "p2": {
+            "x": 0,
+            "y": 5
+          },
+          "lockedFirst": false
+        },
+        {
+          "p1": {
+            "x": 0,
+            "y": 5
+          },
+          "p2": {
+            "x": 0,
+            "y": 6
+          },
+          "lockedFirst": false
+        },
+        {
+          "p1": {
+            "x": 0,
+            "y": 6
+          },
+          "p2": {
+            "x": 0,
+            "y": 7
+          },
+          "lockedFirst": false
+        },
+        {
+          "p1": {
+            "x": 0,
+            "y": 7
+          },
+          "p2": {
+            "x": 0,
+            "y": 8
+          },
+          "lockedFirst": false
+        }
+      ]
+    },
+    {
+      "colour": 1,
+      "end": 8,
+      "numUncommitted": 0,
+      "lines": [
+        {
+          "p1": {
+            "x": 1,
+            "y": 2
+          },
+          "p2": {
+            "x": 1,
+            "y": 3
+          },
+          "lockedFirst": false
+        },
+        {
+          "p1": {
+            "x": 1,
+            "y": 3
+          },
+          "p2": {
+            "x": 1,
+            "y": 4
+          },
+          "lockedFirst": false
+        },
+        {
+          "p1": {
+            "x": 1,
+            "y": 4
+          },
+          "p2": {
+            "x": 1,
+            "y": 5
+          },
+          "lockedFirst": false
+        },
+        {
+          "p1": {
+            "x": 1,
+            "y": 5
+          },
+          "p2": {
+            "x": 1,
+            "y": 6
+          },
+          "lockedFirst": false
+        },
+        {
+          "p1": {
+            "x": 1,
+            "y": 6
+          },
+          "p2": {
+            "x": 1,
+            "y": 7
+          },
+          "lockedFirst": false
+        },
+        {
+          "p1": {
+            "x": 1,
+            "y": 7
+          },
+          "p2": {
+            "x": 0,
+            "y": 8
+          },
+          "lockedFirst": false
+        }
+      ]
+    },
+    {
+      "colour": 2,
+      "end": 8,
+      "numUncommitted": 0,
+      "lines": [
+        {
+          "p1": {
+            "x": 1,
+            "y": 2
+          },
+          "p2": {
+            "x": 2,
+            "y": 3
+          },
+          "lockedFirst": true
+        },
+        {
+          "p1": {
+            "x": 2,
+            "y": 3
+          },
+          "p2": {
+            "x": 2,
+            "y": 4
+          },
+          "lockedFirst": false
+        },
+        {
+          "p1": {
+            "x": 2,
+            "y": 4
+          },
+          "p2": {
+            "x": 2,
+            "y": 5
+          },
+          "lockedFirst": false
+        },
+        {
+          "p1": {
+            "x": 2,
+            "y": 5
+          },
+          "p2": {
+            "x": 2,
+            "y": 6
+          },
+          "lockedFirst": false
+        },
+        {
+          "p1": {
+            "x": 2,
+            "y": 6
+          },
+          "p2": {
+            "x": 2,
+            "y": 7
+          },
+          "lockedFirst": false
+        },
+        {
+          "p1": {
+            "x": 2,
+            "y": 7
+          },
+          "p2": {
+            "x": 0,
+            "y": 8
+          },
+          "lockedFirst": false
+        }
+      ]
+    }
+  ]
+}

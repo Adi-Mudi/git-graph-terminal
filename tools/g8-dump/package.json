@@ -1,0 +1,22 @@
+{
+  "name": "g8-dump",
+  "version": "0.1.0",
+  "private": true,
+  "description": "G8 golden-fixture harness (P0 T3): executes the reference webview layout (web/graph.ts) headlessly on fixture repos and writes tests/fixtures/golden/<fixture>.json",
+  "type": "module",
+  "license": "MIT",
+  "scripts": {
+    "fixtures": "bash make-fixtures.sh",
+    "dump": "node g8-dump.mjs --all",
+    "check": "node g8-dump.mjs --all --check",
+    "dump:linear": "node g8-dump.mjs --fixture linear",
+    "dump:branch-merge-rebase": "node g8-dump.mjs --fixture branch-merge-rebase"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "jsdom": "^30.1.2",
+    "typescript": "^5.9.3"
+  }
+}

@@ -1,2 +1,7 @@
 .IDE_Plans/
 target/
+
+# P0 T3: generated G8 fixture repos (regenerate with tools/g8-dump/make-fixtures.sh)
+tests/fixtures/repos/
+# node harness devDependencies
+tools/g8-dump/node_modules/
