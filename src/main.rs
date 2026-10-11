@@ -2,15 +2,17 @@
 //!
 //! Event loop + terminal setup/teardown (alternate screen, raw mode), the graph
 //! renderer in [`render`], and a status bar over the commit data from [`data`].
-//! The layout *engine* (`layout()` → [`GraphLayout`]) is lane a1's W1 work; until
-//! it merges, `--mock` draws the hand-built fixture from [`render::mock`] so the
-//! renderer is exercised end to end without a1's code.
+//! W2 / F3 wires the real path: `data::commits` → `layout::layout()` → [`render`];
+//! `--mock` draws the hand-built fixture from [`render::mock`] so tests stay
+//! independent of git, and `--text-list` keeps the P0 bordered text list.
 //!
 //! Usage:
-//! * `git-graph-terminal [REPO]` (default `.`) — text list (no layout engine yet).
-//! * `git-graph-terminal --mock [REPO]` — graph view on the mock fixture.
+//! * `git-graph-terminal [REPO]` (default `.`) — borderless graph view over the
+//!   real `data → layout → render` path.
+//! * `git-graph-terminal --text-list [REPO]` — P0's bordered text list (fallback).
+//! * `git-graph-terminal --mock [REPO]` — graph view on the hand-built mock fixture.
 //! * `git-graph-terminal --dump [REPO]` — print one frame to stdout and exit
-//!   (headless verification; combine with `--mock`).
+//!   (headless verification; a real repo dumps the text list, `--mock` the mock graph).
 
 mod data;
 mod layout;
@@ -30,6 +32,7 @@ use ratatui::Terminal;
 
 use crate::data::Commit;
 use crate::layout::types::GraphLayout;
+use crate::layout::LayoutOpts;
 use crate::render::glyphs::GlyphTier;
 use crate::render::ViewOptions;
 
@@ -182,6 +185,7 @@ fn main() -> io::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let dump = args.iter().any(|a| a == "--dump");
     let mock = args.iter().any(|a| a == "--mock");
+    let text_list = args.iter().any(|a| a == "--text-list");
     let repo = args
         .iter()
         .find(|a| !a.starts_with('-'))
@@ -193,23 +197,14 @@ fn main() -> io::Result<()> {
     // Capability tier + colour come from the environment (G2 minimal ladder).
     let tier = GlyphTier::detect_from_os();
     let colour = render::glyphs::colour_enabled_os();
-    // The layout engine is lane a1's W1 deliverable; `--mock` stands in for it.
-    let graph: Option<GraphLayout> = mock.then(render::mock::demo_layout);
-    let view = match graph.as_ref() {
-        Some(layout) => ViewOptions {
-            graph: Some(layout),
-            tier,
-            colour,
-            uncommitted: Some(0),
-        },
-        None => ViewOptions {
-            tier,
-            colour,
-            ..ViewOptions::TEXT_ONLY
-        },
-    };
+    // W2 / F3: real repos go `data::commits → layout::layout() → render`. `--mock`
+    // keeps the hand-built fixture for tests, `--text-list` keeps P0's bordered
+    // list as the fallback, and a real-repo `--dump` prints that list so the P0
+    // evidence frames stay reproducible (`--mock --dump` still dumps the mock graph).
+    let mut graph: Option<GraphLayout> = build_graph(mock, text_list || dump, &app);
 
     if dump {
+        let view = make_view(graph.as_ref(), tier, colour, mock);
         return dump_frame(&app, &view);
     }
 
@@ -221,6 +216,7 @@ fn main() -> io::Result<()> {
     }
 
     loop {
+        let view = make_view(graph.as_ref(), tier, colour, mock);
         terminal.draw(|frame| render::ui(frame, &app, &mut list_state, &view))?;
 
         if !event::poll(Duration::from_millis(250))? {
@@ -250,6 +246,8 @@ fn main() -> io::Result<()> {
             KeyCode::Char('r') => {
                 let selected = list_state.selected();
                 app = if mock { App::demo() } else { App::load(&repo) };
+                // Rebuild the layout too, or the graph and the reloaded commits drift apart.
+                graph = build_graph(mock, text_list || dump, &app);
                 list_state.select(selected.filter(|i| *i < app.commits.len()).or(
                     if app.commits.is_empty() {
                         None
@@ -266,6 +264,39 @@ fn main() -> io::Result<()> {
     drop(terminal);
     let _ = io::stdout().flush();
     Ok(())
+}
+
+/// The graph layout backing the current view, if any.
+///
+/// `mock` → the hand-built fixture; `text_only` (and not `mock`) → no graph, so
+/// the P0 text list is drawn; otherwise the real path: the commits already loaded
+/// into `app` go through the W1 layout engine.
+fn build_graph(mock: bool, text_only: bool, app: &App) -> Option<GraphLayout> {
+    if mock {
+        Some(render::mock::demo_layout())
+    } else if text_only {
+        None
+    } else {
+        Some(layout::layout(&app.commits, &LayoutOpts::default()))
+    }
+}
+
+/// [`ViewOptions`] for one frame.
+fn make_view<'a>(
+    graph: Option<&'a GraphLayout>,
+    tier: GlyphTier,
+    colour: bool,
+    mock: bool,
+) -> ViewOptions<'a> {
+    let mut view = ViewOptions {
+        tier,
+        colour,
+        ..ViewOptions::TEXT_ONLY
+    };
+    view.graph = graph;
+    // Only the mock fixture carries an uncommitted row; `data.rs` does not model it.
+    view.uncommitted = if mock { Some(0) } else { None };
+    view
 }
 
 /// Headless verification path: render one frame into a test backend and print it.
