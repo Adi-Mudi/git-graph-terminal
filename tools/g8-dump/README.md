@@ -19,7 +19,9 @@ never called (they need a real layout engine and are not part of the topology co
 
 ## Requirements
 
-- node ≥ 20 (developed on v22.22.1), npm, git
+- node ^22.22.2 || ^24.15.0 || >=26.0.0 (developed on v22.22.1 — one patch below the
+  required 22.22.2, which is why npm prints harmless `EBADENGINE` warnings; see Notes),
+  npm, git
 - the read-only reference checkout. Default path: `../../../vscode-git-graph`
   (sibling of this project). Override with `--reference <dir>` or `G8_REFERENCE_REPO=<dir>`.
 
@@ -27,7 +29,7 @@ never called (they need a real layout engine and are not part of the topology co
 
 ```bash
 cd tools/g8-dump
-npm install            # devDeps only: typescript ^5.9.3, jsdom ^30.1.2
+npm ci                 # devDeps only: typescript ^5.9.3, jsdom ^30.1.2 (lockfile-exact)
 npm run fixtures       # creates tests/fixtures/repos/{linear,branch-merge-rebase}
 npm run dump           # writes tests/fixtures/golden/*.json
 npm run check          # re-runs and fails if the committed golden files differ
@@ -36,7 +38,7 @@ npm run check          # re-runs and fails if the committed golden files differ
 One-liner from the project root:
 
 ```bash
-cd tools/g8-dump && npm install && npm run fixtures && npm run dump && npm run check
+cd tools/g8-dump && npm ci && npm run fixtures && npm run dump && npm run check
 ```
 
 Single fixture / dry runs:
@@ -107,10 +109,18 @@ diff -r ../../tests/fixtures/golden /tmp/g8-golden   # must be empty
 ## Notes / limitations (P0)
 
 - `node_modules/` and `tests/fixtures/repos/` are git-ignored; the golden JSON files are
-  committed and are the reviewable artifact.
+  committed and are the reviewable artifact. Install with `npm ci`, not `npm install`:
+  `npm ci` installs the committed `package-lock.json` exactly and leaves the working tree
+  clean, while `npm install` may rewrite the lockfile.
 - Stashes and the "uncommitted changes" row are not modelled (`stash: null`,
   `--max-count=1000`), because `Graph.loadCommits()` only needs `hash`, `parents`, `stash`
   and the HEAD hash. Larger fixtures for perf work (G5, 30k commits) are M1 scope.
-- npm prints `EBADENGINE` for the transitive `w3c-xmlserializer@6.0.0` (wants node ≥
-  22.22.2; this machine has 22.22.1). It is a warning only — install and dumps work.
-  CI should pin node ≥ 22.22.2.
+- `npm ci` prints `EBADENGINE` for 4 packages on node 22.22.1: the direct devDependency
+  `jsdom@30.1.2`, its helpers `@asamuzakjp/css-color@7.1.5` and
+  `@asamuzakjp/dom-selector@9.2.4`, and the transitive `w3c-xmlserializer@6.0.0` — all
+  declare `node: ^22.22.2 || ^24.15.0 || >=26.0.0`. `package.json` declares the same range,
+  so on this machine (22.22.1) this package warns as well: 5 `EBADENGINE` warnings in total.
+  They are warnings, not errors — `npm ci`, `npm run fixtures`, `npm run dump` and
+  `npm run check` all succeed on 22.22.1 and the committed goldens come out byte-identical.
+  Remedy: use node ≥ 22.22.2 (or ≥ 24.15.0, or ≥ 26) to clear every warning; CI pins such
+  a version.
