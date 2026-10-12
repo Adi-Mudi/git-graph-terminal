@@ -51,7 +51,8 @@ use crossterm::terminal::{
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 
-use crate::app::{reduce, Action, AppState, ClickTarget, MenuKey, MenuNav, Outcome};
+use crate::app::{dialog_key, reduce, Action, AppState, ClickTarget, MenuKey, MenuNav, Outcome};
+use crate::dialog::DialogResult;
 use crate::menu::MenuSurface;
 use crate::render::glyphs::GlyphTier;
 use crate::render::ViewOptions;
@@ -141,6 +142,26 @@ fn main() -> io::Result<()> {
         }
         match event::read()? {
             Event::Key(key) if key.kind == KeyEventKind::Press => {
+                // The modal dialog is the outermost overlay while it is open, so
+                // it claims the keyboard before the menu and the global map
+                // (W7/T1).
+                if state.dialog_is_open() {
+                    if let Some(dialog_key_event) = keymap::dialog_key_for(key) {
+                        match dialog_key(&mut state, dialog_key_event) {
+                            Some(DialogResult::Submit { .. }) => {
+                                if reduce(&mut state, Action::DialogConfirm, &repo) == Outcome::Quit
+                                {
+                                    break;
+                                }
+                            }
+                            Some(DialogResult::Cancel) => {
+                                reduce(&mut state, Action::DialogCancel, &repo);
+                            }
+                            None => {}
+                        }
+                    }
+                    continue;
+                }
                 if state.menu_is_open() {
                     // The overlay owns the keyboard until it closes (Esc).
                     if let Some(nav) = keymap::menu_nav_for(key) {

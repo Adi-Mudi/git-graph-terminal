@@ -464,6 +464,11 @@ impl AppState {
         self.menu.is_some()
     }
 
+    /// Is a modal dialog open? While `Some`, the dialog owns the keyboard (W7/T1).
+    pub fn dialog_is_open(&self) -> bool {
+        self.dialog.is_some()
+    }
+
     /// Does any loaded row carry a remote-tracking decoration?
     ///
     /// `data.rs` does not load the remote list, so the refs are the only signal

@@ -45,6 +45,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::app::{Action, MenuNav};
+use crate::dialog::DialogKey;
 
 /// Does this key open the context menu for the selected row?
 ///
@@ -74,6 +75,39 @@ pub fn menu_nav_for(key: KeyEvent) -> Option<MenuNav> {
         KeyCode::Char(key) if key.is_ascii_alphabetic() => {
             Some(MenuNav::Shortcut(key.to_ascii_lowercase()))
         }
+        _ => None,
+    }
+}
+
+/// Translate a key for the **open** dialog (W7/T1).
+///
+/// The reference routes these from a window-level listener
+/// (`web/main.ts:2032-2040`): `Escape` closes the dialog and `Enter` submits it
+/// from anywhere, including inside an input. `Tab`/`Shift+Tab` (and the arrow
+/// aliases) walk the generated `tabindex` order, and a plain character edits the
+/// focused text field.
+///
+/// This runs **before** the menu and the global [`action_for`] map, so the
+/// dialog provably owns the keyboard while it is open.
+pub fn dialog_key_for(key: KeyEvent) -> Option<DialogKey> {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    let alt = key.modifiers.contains(KeyModifiers::ALT);
+    if ctrl || alt {
+        return None;
+    }
+    match key.code {
+        KeyCode::Esc => Some(DialogKey::Escape),
+        KeyCode::Enter => Some(DialogKey::Submit),
+        KeyCode::Tab | KeyCode::Down => Some(DialogKey::Next),
+        KeyCode::BackTab | KeyCode::Up => Some(DialogKey::Prev),
+        KeyCode::Backspace => Some(DialogKey::Backspace),
+        KeyCode::Delete => Some(DialogKey::Delete),
+        KeyCode::Left => Some(DialogKey::Left),
+        KeyCode::Right => Some(DialogKey::Right),
+        KeyCode::Home => Some(DialogKey::Home),
+        KeyCode::End => Some(DialogKey::End),
+        KeyCode::Char(' ') => Some(DialogKey::Space),
+        KeyCode::Char(c) => Some(DialogKey::Char(c)),
         _ => None,
     }
 }
