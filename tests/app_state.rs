@@ -23,14 +23,28 @@
 mod data;
 #[path = "../src/layout/mod.rs"]
 mod layout;
-#[path = "../src/render/mock.rs"]
-pub mod mock;
 
-/// `app.rs` reaches for `crate::render::mock` in `AppState::demo()`; re-export the
-/// single included render module under that name.
-mod render {
-    pub use crate::mock;
-}
+/// The whole render layer, not just `mock`: `app.rs` now reaches for
+/// `crate::render::highlighted` through `columns.rs`, and `render/mod.rs`
+/// declares its own children relative to itself, so including the module file
+/// is both shorter and more faithful than re-exporting pieces by hand.
+#[path = "../src/render/mod.rs"]
+mod render;
+
+// W6: `app.rs` owns the find widget, the confirmation dialog and the commit
+// details view, so those modules come along for the ride.
+#[allow(dead_code)]
+#[path = "../src/cdv.rs"]
+mod cdv;
+#[allow(dead_code)]
+#[path = "../src/dialog.rs"]
+mod dialog;
+#[allow(dead_code)]
+#[path = "../src/files.rs"]
+mod files;
+#[allow(dead_code)]
+#[path = "../src/find/mod.rs"]
+mod find;
 
 #[path = "../src/app.rs"]
 mod app;
