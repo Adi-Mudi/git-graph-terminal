@@ -459,6 +459,11 @@ pub fn plan(action: RefAction, target: &ActionTarget) -> ActionPlan {
     // Small local helpers keep each arm a single line.
     let name = || ActionTarget::first(&[&target.name, &target.ref_name, &target.branch]);
     let obj = || ActionTarget::first(&[&target.hash, &target.commit, &target.ref_name]);
+    // W6/T2: `CreateBranch`'s dialog asks for the new branch name in a
+    // `new_name` field, so the form value has to outrank the base ref the menu
+    // put in `name`/`ref_name`/`branch`.
+    let branch_name =
+        || ActionTarget::first(&[&target.new_name, &target.name, &target.ref_name, &target.branch]);
 
     match action {
         AddRemote => {
@@ -657,7 +662,7 @@ pub fn plan(action: RefAction, target: &ActionTarget) -> ActionPlan {
             if target.force && !target.checkout {
                 argv.push("-f".to_string());
             }
-            argv.push(name());
+            argv.push(branch_name());
             argv.push(target.hash.clone());
             argv.retain(|part| !part.is_empty());
             ActionPlan::new(
@@ -1510,9 +1515,16 @@ mod tests {
 
     #[test]
     fn create_branch_and_remote_argv() {
+        // The menu puts the base ref into `name`/`ref_name`/`branch`; the W6
+        // dialog types the new branch name into `new_name`, which outranks the
+        // base ref when it is set (`new_name` is empty for a menu-only target).
+        let menu_only = ActionTarget {
+            new_name: String::new(),
+            ..target()
+        };
         let checkout = ActionTarget {
             checkout: true,
-            ..target()
+            ..menu_only.clone()
         };
         assert_eq!(
             super::plan(RefAction::CreateBranch, &checkout).argv,
@@ -1520,11 +1532,20 @@ mod tests {
         );
         let no_checkout = ActionTarget {
             checkout: false,
-            ..target()
+            ..menu_only
         };
         assert_eq!(
             super::plan(RefAction::CreateBranch, &no_checkout).argv,
             vec!["branch", "main", "abc1234"]
+        );
+        // The dialog's `new_name` field wins over the base ref.
+        let typed = ActionTarget {
+            checkout: false,
+            ..target()
+        };
+        assert_eq!(
+            super::plan(RefAction::CreateBranch, &typed).argv,
+            vec!["branch", "renamed", "abc1234"]
         );
         assert_eq!(
             super::plan(
