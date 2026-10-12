@@ -355,15 +355,31 @@ pub(crate) fn highlighted(text: &str, style: Style, find: Option<&FindWidget>) -
 }
 
 /// Geometry the mouse router needs, derived from the same numbers `ui` used.
-pub fn hit_geometry(state: &AppState, view: &ViewOptions<'_>) -> Option<HitGeometry> {
+pub fn hit_geometry(
+    state: &AppState,
+    view: &ViewOptions<'_>,
+    screen_height: u16,
+) -> Option<HitGeometry> {
     let layout = view.graph?;
     let width = state.status.width;
     if width == 0 {
         return None;
     }
-    // `status.height` is the graph body: the screen minus the status bar and the
-    // one-row table header. Add the header row back to get the main area.
-    let main_height = state.status.height.saturating_add(1);
+    // `ui` stacks the docked CDV, the find bar and the status bar under the main
+    // area, so the main area is the screen minus exactly those rows. Deriving it
+    // from `overlay_rows` keeps the router and the renderer on one formula —
+    // `status.height` alone does not know about the overlays (W10).
+    let overlays = overlay_rows(state, screen_height);
+    let main_height = screen_height
+        .saturating_sub(overlays.cdv)
+        .saturating_sub(overlays.find)
+        .saturating_sub(STATUS_HEIGHT);
+    let cdv = (overlays.cdv > 0).then_some(Rect {
+        x: 0,
+        y: main_height,
+        width,
+        height: overlays.cdv,
+    });
     Some(HitGeometry {
         body: Rect {
             x: 0,
@@ -373,6 +389,7 @@ pub fn hit_geometry(state: &AppState, view: &ViewOptions<'_>) -> Option<HitGeome
         },
         graph_width: text_offset(layout.max_lane).min(width),
         has_header: main_height > 1,
+        cdv,
     })
 }
 

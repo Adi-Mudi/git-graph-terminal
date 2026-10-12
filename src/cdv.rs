@@ -330,6 +330,24 @@ impl CdvState {
         self.selected_row().map(|row| row.path)
     }
 
+    /// Move the cursor to the file row for `path`, if the panel lists it (W10).
+    ///
+    /// A mouse click is both a selection and the subject of the `FileRow` menu,
+    /// and that menu reads the row under the cursor — so the click has to move
+    /// the cursor, or the menu would act on a different file. Folder rows are
+    /// skipped: they are not a `FileRow` menu target.
+    pub fn select_path(&mut self, path: &str) -> bool {
+        let Some(index) = self
+            .file_rows()
+            .iter()
+            .position(|row| matches!(row.kind, FileRowKind::File(_)) && row.path == path)
+        else {
+            return false;
+        };
+        self.selected = index;
+        true
+    }
+
     /// The change the cursor points at, or `None` on a folder row (A65–A68).
     pub fn selected_change(&self) -> Option<&GitFileChange> {
         match self.selected_row()?.kind {

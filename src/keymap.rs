@@ -173,7 +173,11 @@ pub fn find_key_for(key: KeyEvent) -> Option<FindKey> {
 /// | `k` / `Up` | previous file row | — |
 /// | `Enter` | A65 View Diff | file-row menu |
 /// | `o` | A66 View File at Revision | file-row menu |
-/// | `Space` | A68 Mark Reviewed (VIS-049) | the row's `Reviewed` cell |
+/// | `w` | A67 View Diff with Working File | file-row menu |
+/// | `e` | A68 Open File | file-row menu |
+/// | `Space` | A69/A70 toggle Reviewed (VIS-049) | the row's `Reviewed` cell |
+/// | `R` | A71 Reset File to this Revision | file-row menu (gated) |
+/// | `y` / `Y` | A72/A73 copy absolute / relative path | file-row menu |
 /// | `Left` | collapse folder | `alterFileTreeFolderOpen` |
 /// | `Right` | expand folder | `alterFileTreeFolderOpen` |
 pub fn cdv_key_for(key: KeyEvent) -> Option<Action> {
@@ -185,6 +189,15 @@ pub fn cdv_key_for(key: KeyEvent) -> Option<Action> {
         KeyCode::Up | KeyCode::Char('k') => Some(Action::CdvFilePrev),
         KeyCode::Enter => Some(Action::CdvFileViewDiff),
         KeyCode::Char('o') | KeyCode::Char('O') => Some(Action::CdvFileViewRevision),
+        // A67/A68 — the two rows the W7 slice left to the menu (W10).
+        KeyCode::Char('w') | KeyCode::Char('W') => Some(Action::CdvFileViewDiffWithWorkingFile),
+        KeyCode::Char('e') | KeyCode::Char('E') => Some(Action::CdvFileOpen),
+        // A71 is gated, so it gets the shifted key: a stray press must not arm a
+        // working-tree overwrite.
+        KeyCode::Char('R') => Some(Action::CdvFileResetToRevision),
+        // A72/A73 differ only in the payload, so the case selects which one.
+        KeyCode::Char('y') => Some(Action::CdvFileCopyAbsolutePath),
+        KeyCode::Char('Y') => Some(Action::CdvFileCopyRelativePath),
         KeyCode::Char(' ') => Some(Action::CdvFileToggleReviewed),
         KeyCode::Left => Some(Action::CdvFolderCollapse),
         KeyCode::Right => Some(Action::CdvFolderExpand),
@@ -479,6 +492,11 @@ mod tests {
             CdvFileToggleReviewed => (Route::Cdv, key(KeyCode::Char(' '))),
             CdvFolderCollapse => (Route::Cdv, key(KeyCode::Left)),
             CdvFolderExpand => (Route::Cdv, key(KeyCode::Right)),
+            CdvFileViewDiffWithWorkingFile => (Route::Cdv, key(KeyCode::Char('w'))),
+            CdvFileOpen => (Route::Cdv, key(KeyCode::Char('e'))),
+            CdvFileResetToRevision => (Route::Cdv, key(KeyCode::Char('R'))),
+            CdvFileCopyAbsolutePath => (Route::Cdv, key(KeyCode::Char('y'))),
+            CdvFileCopyRelativePath => (Route::Cdv, key(KeyCode::Char('Y'))),
             // Everything else comes from the global map.
             SelectNext => (Route::Global, key(KeyCode::Char('j'))),
             SelectPrev => (Route::Global, key(KeyCode::Char('k'))),
