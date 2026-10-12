@@ -44,8 +44,15 @@
 //! 3. **Signature shows as a badge + tooltip text.** `generateSignatureHtml`
 //!    (`web/main.ts:3949-3959`) uses an icon with a `title`; the terminal shows
 //!    the icon glyph and, on the same line, the description.
+//! 4. **The pane always splits.** Mockup v3 lays the panel out as
+//!    `.pane{display:grid;grid-template-columns:1fr 1fr}` — commit information
+//!    left, modified files right. The port keeps those two columns at every
+//!    width instead of falling back to a stacked column: one layout path keeps
+//!    [`inline_height`] a pure function of the content, so it needs no width.
+//!    A very narrow terminal therefore gets two tight columns rather than a
+//!    stacked pane.
 
-use ratatui::layout::Rect;
+use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
@@ -97,6 +104,14 @@ pub struct CdvState {
     pub hash: String,
     /// `expandedCommit.compareWithHash` — `Some` for a comparison (VIS-040).
     pub compare_with: Option<String>,
+    /// The commit's refs, as git's `%D` decoration list.
+    ///
+    /// The reference reads `gitBranch[]` / `tag[]` off the commit object; the
+    /// port reuses the decorations the commit table already carries
+    /// (`src/data.rs`). The left column splits them into the mockup's `Branch`
+    /// and `Tags` rows (mockup v3, `.pane .col` #1). Empty for the uncommitted
+    /// and comparison kinds, which have no single commit behind them.
+    pub refs: Vec<String>,
     /// `expandedCommit.commitDetails` (VIS-038).
     pub detail: Option<files::CommitDetail>,
     /// `expandedCommit.fileChanges` (VIS-047).
@@ -134,6 +149,7 @@ impl CdvState {
             row,
             hash: hash.to_string(),
             compare_with,
+            refs: Vec::new(),
             detail: None,
             changes: Vec::new(),
             tree: FileTree::default(),
@@ -158,6 +174,7 @@ impl CdvState {
             row,
             hash: crate::data::UNCOMMITTED.to_string(),
             compare_with: None,
+            refs: Vec::new(),
             detail: None,
             changes,
             tree,
@@ -182,6 +199,7 @@ impl CdvState {
             row,
             hash: from.to_string(),
             compare_with: Some(to.to_string()),
+            refs: Vec::new(),
             detail: None,
             changes,
             tree,
@@ -358,7 +376,9 @@ impl CdvState {
         if viewport == 0 {
             return;
         }
-        let header = self.summary_lines().len() as u16 + 2;
+        // The file cursor lives in the **right** column, whose own header is the
+        // single `Files (N) — <view> View` line — not under the summary.
+        let header: u16 = 1;
         let line = header.saturating_add(self.selected as u16);
         if line < self.scroll {
             self.scroll = line;
@@ -367,7 +387,39 @@ impl CdvState {
         }
     }
 
+    /// The `Branch` row's value (mockup v3, `.pane .col` #1).
+    ///
+    /// `%D` reports the checked-out branch as `HEAD -> main` and a detached
+    /// HEAD as a bare `HEAD`; the mockup lists the branch *name*, so the
+    /// decoration prefix comes off and a bare `HEAD` is dropped. A commit on no
+    /// branch at all shows the mockup's dash.
+    pub fn branches_label(&self) -> String {
+        let branches: Vec<String> = self
+            .refs
+            .iter()
+            .filter(|entry| !entry.starts_with("tag: "))
+            .map(|entry| entry.strip_prefix("HEAD -> ").unwrap_or(entry))
+            .filter(|entry| *entry != "HEAD")
+            .map(str::to_string)
+            .collect();
+        join_or_dash(&branches)
+    }
+
+    /// The `Tags` row's value — git's `tag: v1` decorations, prefix stripped.
+    pub fn tags_label(&self) -> String {
+        let tags: Vec<String> = self
+            .refs
+            .iter()
+            .filter_map(|entry| entry.strip_prefix("tag: "))
+            .map(str::to_string)
+            .collect();
+        join_or_dash(&tags)
+    }
+
     /// The summary lines (`web/main.ts:2539-2575`) — VIS-038/039/040.
+    ///
+    /// This is the **left** column of the mockup's pane; the right one is
+    /// [`CdvState::file_lines`].
     pub fn summary_lines(&self) -> Vec<Line<'static>> {
         if let Some(error) = &self.error {
             return vec![Line::styled(
@@ -471,6 +523,22 @@ impl CdvState {
             },
             &long_date(detail.committer_date),
             value,
+        ));
+        // Mockup v3, `.pane .col` #1: `Branch` then `Tags`, between the dates
+        // and the message. The reference has no such rows — it draws the refs
+        // as graph decorations — so the values come from the decorations this
+        // commit already carries.
+        lines.push(kv(
+            &key,
+            "Branch: ",
+            &self.branches_label(),
+            Style::default().fg(Color::Cyan),
+        ));
+        lines.push(kv(
+            &key,
+            "Tags: ",
+            &self.tags_label(),
+            Style::default().fg(Color::Yellow),
         ));
 
         let body = detail.body_after_subject();
@@ -576,18 +644,39 @@ impl CdvState {
         }
     }
 
-    /// Every line the panel draws, in order.
-    pub fn lines(&self) -> Vec<Line<'static>> {
+    /// The loading line — the whole panel while the details are in flight.
+    fn loading_line(&self) -> Line<'static> {
+        Line::styled(
+            format!("⏳ Loading {} ...", self.kind.loading_label()),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )
+    }
+
+    /// The **left** column as drawn: the spinner while loading, else the
+    /// commit information (mockup v3, `.pane .col` #1).
+    fn left_column(&self) -> Vec<Line<'static>> {
         if self.loading {
-            return vec![Line::styled(
-                format!("⏳ Loading {} ...", self.kind.loading_label()),
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            )];
+            return vec![self.loading_line()];
         }
-        let mut lines = self.summary_lines();
-        lines.push(Line::default());
+        self.summary_lines()
+    }
+
+    /// The **right** column as drawn: empty while loading, so the spinner is
+    /// never followed by a file list that has not arrived yet (mockup v3,
+    /// `.pane .col` #2).
+    fn right_column(&self) -> Vec<Line<'static>> {
+        if self.loading {
+            return Vec::new();
+        }
+        self.file_lines()
+    }
+
+    /// The **right** column of the mockup's pane: the modified-file list, then
+    /// the totals and the diff-summary sentence.
+    pub fn file_lines(&self) -> Vec<Line<'static>> {
+        let mut lines = Vec::new();
         // VIS-041 / VIS-042: the active file view is named in the panel.
         lines.push(Line::styled(
             format!(
@@ -609,7 +698,91 @@ impl CdvState {
                 lines.push(self.file_line(row, index == self.selected));
             }
         }
+        lines.push(Line::default());
+        lines.push(self.totals_line());
+        lines.push(self.diff_summary_line());
         lines
+    }
+
+    /// `(files changed, additions, deletions)` — the mockup's `.totals`.
+    ///
+    /// A binary file carries no counts, so it counts towards the file total but
+    /// adds nothing to the line counts. That is the reference's `textFile` test
+    /// (`web/main.ts:3584`), the same one [`GitFileChange::text_file`] ports.
+    pub fn totals(&self) -> (usize, u32, u32) {
+        let mut additions = 0;
+        let mut deletions = 0;
+        for change in &self.changes {
+            if !change.text_file() {
+                continue;
+            }
+            additions += change.additions.unwrap_or(0);
+            deletions += change.deletions.unwrap_or(0);
+        }
+        (self.changes.len(), additions, deletions)
+    }
+
+    /// The mockup's totals line: `Total files changed: 2 · additions: +12 ·
+    /// deletions: −3`.
+    pub fn totals_line(&self) -> Line<'static> {
+        let (files, additions, deletions) = self.totals();
+        let dim = Style::default().fg(Color::DarkGray);
+        Line::from(vec![
+            Span::styled("Total files changed: ", dim),
+            Span::styled(files.to_string(), Style::default()),
+            Span::styled(" · additions: ", dim),
+            Span::styled(format!("+{additions}"), Style::default().fg(Color::Green)),
+            Span::styled(" · deletions: ", dim),
+            Span::styled(format!("−{deletions}"), Style::default().fg(Color::Red)),
+        ])
+    }
+
+    /// The mockup's diff-summary sentence: `Diff summary: 2 files changed, 12
+    /// insertions(+), 3 deletions(−)`.
+    pub fn diff_summary_line(&self) -> Line<'static> {
+        let (files, additions, deletions) = self.totals();
+        Line::styled(
+            format!(
+                "Diff summary: {files} files changed, {additions} insertions(+), {deletions} deletions(−)"
+            ),
+            Style::default().fg(Color::DarkGray),
+        )
+    }
+
+    /// Every line the panel draws, stacked — the left column, a blank, then the
+    /// right column.
+    ///
+    /// The panel draws the two columns side by side (mockup v3
+    /// `.pane{grid-template-columns:1fr 1fr}`), so this stacked form is not what
+    /// is painted: it is the test-facing text view of the whole panel, in the
+    /// order a stacked terminal would read. `--dump` reports
+    /// [`CdvState::status_line`] instead.
+    #[cfg(test)]
+    pub fn lines(&self) -> Vec<Line<'static>> {
+        let mut lines = self.left_column();
+        let right = self.right_column();
+        if !right.is_empty() {
+            lines.push(Line::default());
+            lines.extend(right);
+        }
+        lines
+    }
+
+    /// The block title the mockup draws above the pane.
+    ///
+    /// Mockup v3 (Q1) heads the expanded block with `├─ Commit Details — same
+    /// design, expanded in place`. The loading and error states have no mockup
+    /// text, so they name themselves instead of claiming the pane is loaded.
+    /// [`CdvState::status_line`] still carries the full state for `--dump`.
+    pub fn block_title(&self) -> String {
+        let suffix = if self.loading {
+            "loading…"
+        } else if self.error.is_some() {
+            "error"
+        } else {
+            "same design, expanded in place"
+        };
+        format!("├─ {} — {suffix}", self.kind.title())
     }
 
     /// The one-line panel state, for `--dump` evidence.
@@ -689,6 +862,15 @@ fn kv(key: &Style, label: &str, text: &str, value: Style) -> Line<'static> {
     ])
 }
 
+/// The mockup's dash placeholder for an empty `Branch` / `Tags` value.
+fn join_or_dash(items: &[String]) -> String {
+    if items.is_empty() {
+        "—".to_string()
+    } else {
+        items.join(", ")
+    }
+}
+
 /// The commit list keeps at least this many rows, so the inline panel can never
 /// swallow the whole table (M4-W12).
 pub const MIN_LIST_ROWS: u16 = 4;
@@ -696,11 +878,12 @@ pub const MIN_LIST_ROWS: u16 = 4;
 /// The height the panel needs when it is drawn **inline**, under its commit row
 /// (M4-W12).
 ///
-/// The inline panel is part of the flow, so it asks for exactly what its content
-/// needs. It is still capped by [`MIN_LIST_ROWS`] so it can never swallow the
-/// whole body.
+/// The two columns sit side by side, so the panel is as tall as the **taller**
+/// column — not their sum. The inline panel is part of the flow, so it asks for
+/// exactly what its content needs. It is still capped by [`MIN_LIST_ROWS`] so it
+/// can never swallow the whole body.
 pub fn inline_height(state: &CdvState, body_height: u16) -> u16 {
-    let content = state.lines().len() as u16 + 2;
+    let content = state.left_column().len().max(state.right_column().len()) as u16 + 2;
     let cap = body_height.saturating_sub(MIN_LIST_ROWS).max(1);
     content.min(cap).max(1)
 }
@@ -722,15 +905,27 @@ pub fn draw(frame: &mut Frame, area: Rect, state: &CdvState, focused: bool, ladd
         .borders(Borders::ALL)
         .border_set(ladder.border_set())
         .border_style(border)
-        .title(format!(" {} ", state.status_line()));
+        .title(format!(" {} ", state.block_title()));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let lines = state.lines();
-    let paragraph = Paragraph::new(lines)
-        .scroll((state.scroll, 0))
-        .style(Style::default());
-    frame.render_widget(paragraph, inner);
+    // Mockup v3: `.pane{display:grid;grid-template-columns:1fr 1fr}` — commit
+    // information on the left, modified files on the right. Both columns share
+    // one scroll offset, so scrolling the file list moves the summary with it.
+    let columns =
+        Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).split(inner);
+    frame.render_widget(
+        Paragraph::new(state.left_column())
+            .scroll((state.scroll, 0))
+            .style(Style::default()),
+        columns[0],
+    );
+    frame.render_widget(
+        Paragraph::new(state.right_column())
+            .scroll((state.scroll, 0))
+            .style(Style::default()),
+        columns[1],
+    );
 }
 
 #[cfg(test)]
@@ -1134,5 +1329,143 @@ mod tests {
         assert!(line.contains("1 files"), "{line}");
         assert!(line.contains("List view"), "{line}");
         assert!(line.contains("row 7"), "{line}");
+    }
+
+    /// Q1 — the block title is the mockup's lead line, while `status_line` keeps
+    /// carrying the full state for `--dump`.
+    #[test]
+    fn the_block_title_matches_the_mockup() {
+        let changes = vec![change(GitFileStatus::Added, "a.rs", Some(1), Some(0))];
+        let state = loaded_commit(7, detail(), changes);
+        assert_eq!(
+            state.block_title(),
+            "├─ Commit Details — same design, expanded in place"
+        );
+
+        let loading = CdvState::loading(0, "a1b2c3d", CdvKind::Commit, None);
+        assert_eq!(loading.block_title(), "├─ Commit Details — loading…");
+    }
+
+    /// Mockup v3, `.pane .col` #1: `Branch` and `Tags` sit between the dates
+    /// and the message.
+    #[test]
+    fn the_summary_carries_the_mockup_branch_and_tags_rows() {
+        let mut state = loaded_commit(0, detail(), vec![]);
+        state.refs = vec!["HEAD -> main".to_string(), "tag: v1".to_string()];
+
+        let text = text_of(&state.summary_lines());
+        assert!(text.contains("Branch: main"), "{text}");
+        assert!(text.contains("Tags: v1"), "{text}");
+        let branch = text.find("Branch: ").expect("a Branch row");
+        let body = text.find("body line one").expect("the commit body");
+        assert!(branch < body, "the rows precede the message: {text}");
+    }
+
+    /// A commit on no branch and with no tag shows the mockup's dash, and a
+    /// detached `HEAD` is not a branch name.
+    #[test]
+    fn a_commit_with_no_refs_shows_a_dash_for_branch_and_tags() {
+        let mut state = loaded_commit(0, detail(), vec![]);
+        let text = text_of(&state.summary_lines());
+        assert!(text.contains("Branch: —"), "{text}");
+        assert!(text.contains("Tags: —"), "{text}");
+
+        state.refs = vec!["HEAD".to_string()];
+        assert_eq!(
+            state.branches_label(),
+            "—",
+            "a detached HEAD is not a branch"
+        );
+    }
+
+    /// Several refs of each kind join, and the `HEAD -> ` decoration comes off.
+    #[test]
+    fn branch_and_tag_labels_split_the_decorations() {
+        let mut state = loaded_commit(0, detail(), vec![]);
+        state.refs = vec![
+            "HEAD -> development".to_string(),
+            "origin/development".to_string(),
+            "tag: v1".to_string(),
+            "tag: v2".to_string(),
+        ];
+        assert_eq!(state.branches_label(), "development, origin/development");
+        assert_eq!(state.tags_label(), "v1, v2");
+    }
+
+    /// The mockup's `.totals`: counts sum over text files only — a binary file
+    /// counts towards the file total but carries no line counts
+    /// (`GitFileChange::text_file`).
+    #[test]
+    fn the_totals_sum_text_files_and_skip_binaries() {
+        let changes = vec![
+            change(GitFileStatus::Modified, "src/main.rs", Some(12), Some(3)),
+            change(GitFileStatus::Added, "src/lib.rs", Some(4), Some(0)),
+            change(GitFileStatus::Modified, "logo.png", None, None),
+        ];
+        let state = loaded_commit(0, detail(), changes);
+        assert_eq!(state.totals(), (3, 16, 3));
+    }
+
+    /// The totals line and the diff-summary sentence close the right column.
+    #[test]
+    fn the_right_column_ends_with_the_totals_and_the_diff_summary() {
+        let changes = vec![
+            change(GitFileStatus::Modified, "src/main.rs", Some(12), Some(3)),
+            change(GitFileStatus::Modified, "src/lib.rs", Some(4), Some(1)),
+        ];
+        let state = loaded_commit(0, detail(), changes);
+        let text = text_of(&state.file_lines());
+        assert!(text.contains("Files (2) — Tree View"), "{text}");
+        assert!(
+            text.contains("Total files changed: 2 · additions: +16 · deletions: −4"),
+            "{text}"
+        );
+        assert!(
+            text.contains("Diff summary: 2 files changed, 16 insertions(+), 4 deletions(−)"),
+            "{text}"
+        );
+    }
+
+    /// An empty commit still reports its totals, so the right column has the
+    /// same shape everywhere.
+    #[test]
+    fn an_empty_commit_still_reports_zero_totals() {
+        let state = loaded_commit(0, detail(), vec![]);
+        let text = text_of(&state.file_lines());
+        assert!(text.contains("No file changes."), "{text}");
+        assert!(text.contains("Total files changed: 0"), "{text}");
+        assert!(
+            text.contains("Diff summary: 0 files changed, 0 insertions(+), 0 deletions(−)"),
+            "{text}"
+        );
+    }
+
+    /// The columns sit side by side, so the panel is as tall as the **taller**
+    /// column — not their sum (mockup v3 `.pane`).
+    #[test]
+    fn the_inline_height_is_the_taller_column_not_their_sum() {
+        let changes = vec![change(
+            GitFileStatus::Modified,
+            "src/main.rs",
+            Some(1),
+            Some(1),
+        )];
+        let state = loaded_commit(0, detail(), changes);
+        let left = state.summary_lines().len() as u16;
+        let right = state.file_lines().len() as u16;
+        assert!(left > 1 && right > 1, "left {left} right {right}");
+        // A body tall enough that neither the max nor the sum is clamped.
+        let tall = left + right + MIN_LIST_ROWS + 2;
+        assert_eq!(inline_height(&state, tall), left.max(right) + 2);
+        assert!(inline_height(&state, tall) < left + right + 2);
+    }
+
+    /// While loading there is no file list to draw beside the spinner.
+    #[test]
+    fn the_loading_panel_draws_one_column() {
+        let state = CdvState::loading(0, "abc", CdvKind::Commit, None);
+        assert_eq!(state.lines().len(), 1);
+        let text = text_of(&state.lines());
+        assert!(text.contains("Loading Commit Details ..."), "{text}");
     }
 }

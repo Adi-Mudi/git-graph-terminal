@@ -1677,6 +1677,7 @@ pub fn open_cdv(state: &mut AppState, repo: &Path) {
         return;
     };
     let hash = commit.hash.clone();
+    let refs = commit.refs.clone();
     let mut cdv = CdvState::loading(row, &hash, CdvKind::Commit, None);
     match files::commit_details(repo, &hash) {
         Ok(detail) => match files::commit_file_changes(repo, &hash) {
@@ -1686,6 +1687,9 @@ pub fn open_cdv(state: &mut AppState, repo: &Path) {
         Err(error) => cdv.failed(&error.to_string()),
     }
     cdv.external_diff = files::external_diff_tool(repo);
+    // Mockup v3: the left column's `Branch` / `Tags` rows read the commit's
+    // decorations, which the commit table already carries.
+    cdv.refs = refs;
     state.cdv = Some(cdv);
 }
 

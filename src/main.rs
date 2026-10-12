@@ -529,6 +529,13 @@ fn dump_frame(state: &AppState, view: &ViewOptions<'_>) -> io::Result<()> {
         }
         writeln!(out, "{}", row.trim_end())?;
     }
+    // The panel's border title is the mockup's lead line, so the panel's full
+    // state — kind, view, row, file count, compare target, external diff tool —
+    // is printed here instead. `--dump` is the headless evidence path, which is
+    // what `CdvState::status_line` exists for.
+    if let Some(cdv) = &state.cdv {
+        writeln!(out, "{}", cdv.status_line())?;
+    }
     Ok(())
 }
 
