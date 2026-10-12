@@ -30,7 +30,7 @@
 //! Deviations, all deliberate and documented:
 //!
 //! 1. The reference debounces typing by 200 ms (`findWidget.ts:38-50`). A
-//!    terminal redraws per keypress, so [`FindWidget::set_text`] re-scans
+//!    terminal redraws per keypress, so [`FindWidget::recompute`] re-scans
 //!    immediately — the debounce exists to avoid DOM churn, which has no
 //!    equivalent here.
 //! 2. Highlighting is applied to the rendered column text rather than to DOM
@@ -336,19 +336,6 @@ impl FindWidget {
         }
     }
 
-    /// Set the pattern text and rescan, keeping the current match if it survives.
-    pub fn set_text(
-        &mut self,
-        text: String,
-        commits: &[Commit],
-        columns: &ColumnState,
-        uncommitted: Option<usize>,
-    ) {
-        let previous = self.current_hash().map(str::to_string);
-        self.text = text;
-        self.recompute(commits, columns, uncommitted, previous.as_deref());
-    }
-
     /// Append one character (the terminal's `keyup` handler).
     pub fn push_char(&mut self, c: char) {
         self.text.push(c);
@@ -357,11 +344,6 @@ impl FindWidget {
     /// Remove the last character.
     pub fn pop_char(&mut self) {
         self.text.pop();
-    }
-
-    /// Clear the pattern.
-    pub fn clear_text(&mut self) {
-        self.text.clear();
     }
 
     /// `getCurrentHash()`.
@@ -435,12 +417,10 @@ impl FindWidget {
         }
     }
 
-    /// Is `row` a match at all? (The row gets the `findMatch` background.)
-    pub fn row_is_match(&self, row: usize) -> bool {
-        self.matches.iter().any(|found| found.row == row)
-    }
-
-    /// Is `row` the **current** match? (The row gets `findCurrentCommit`.)
+    /// Is the **current** match at `row`? (`row` gets `findCurrentCommit`.)
+    ///
+    /// The reference tints only this row (`web/findWidget.ts:366`); every other
+    /// matching row is left plain and its matches are highlighted per span.
     pub fn row_is_current(&self, row: usize) -> bool {
         self.current_row() == Some(row)
     }
@@ -711,19 +691,20 @@ mod tests {
     }
 
     #[test]
-    fn set_text_rescans_and_clears_when_emptied() {
+    fn typing_a_pattern_rescans_and_emptying_it_clears_the_matches() {
         let mut widget = FindWidget {
             visible: true,
             ..Default::default()
         };
-        widget.set_text(
-            "compiler".to_string(),
-            &rows(),
-            &ColumnState::default(),
-            None,
-        );
+        for c in "compiler".chars() {
+            widget.push_char(c);
+        }
+        widget.recompute(&rows(), &ColumnState::default(), None, None);
         assert_eq!(matched_rows(&widget), vec![1]);
-        widget.set_text(String::new(), &rows(), &ColumnState::default(), None);
+        while !widget.text.is_empty() {
+            widget.pop_char();
+        }
+        widget.recompute(&rows(), &ColumnState::default(), None, None);
         assert!(widget.matches.is_empty());
         assert!(widget.error.is_none());
         assert_eq!(widget.counter(), "No Results");
@@ -761,10 +742,9 @@ mod tests {
     }
 
     #[test]
-    fn row_helpers_answer_match_and_current() {
+    fn the_current_row_walks_the_matches() {
         let mut widget = scan("Ada", false, false);
-        assert!(widget.row_is_match(0) && widget.row_is_match(3));
-        assert!(!widget.row_is_match(1));
+        assert_eq!(matched_rows(&widget), vec![0, 3]);
         assert!(widget.row_is_current(0));
         assert!(!widget.row_is_current(3));
         widget.next();
@@ -792,7 +772,7 @@ mod tests {
         assert_eq!(widget.text, "ab");
         widget.pop_char();
         assert_eq!(widget.text, "a");
-        widget.clear_text();
+        widget.pop_char();
         assert!(widget.text.is_empty());
         // Popping an empty pattern is a no-op.
         widget.pop_char();

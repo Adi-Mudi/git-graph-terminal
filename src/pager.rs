@@ -184,4 +184,12 @@ mod tests {
         pager.bottom(1);
         assert_eq!(pager.status_line(), "git diff — 100% (3 lines)");
     }
+
+    #[test]
+    fn the_viewport_is_the_screen_minus_the_border() {
+        assert_eq!(viewport(24), 22);
+        assert_eq!(viewport(3), 1);
+        assert_eq!(viewport(2), 1, "clamped so the overlay always shows a row");
+        assert_eq!(viewport(0), 1);
+    }
 }

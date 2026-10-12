@@ -205,6 +205,54 @@ pub enum Action {
     CdvFolderExpand,
 }
 
+impl Action {
+    /// Every variant, for the W7 regression harness.
+    ///
+    /// The harness asserts each one is reachable from a key, so adding a
+    /// variant without a binding fails a test instead of a pty capture. The
+    /// list is test-only API: the shipped binary never enumerates actions.
+    #[cfg(test)]
+    pub const ALL: &'static [Action] = &[
+        Action::SelectNext,
+        Action::SelectPrev,
+        Action::PageNext,
+        Action::PagePrev,
+        Action::Top,
+        Action::Bottom,
+        Action::ToggleExpand,
+        Action::NextBranch,
+        Action::PrevBranch,
+        Action::StashNext,
+        Action::StashPrev,
+        Action::Refresh,
+        Action::Quit,
+        Action::CdvOpen,
+        Action::CdvClose,
+        Action::CdvFocusToggle,
+        Action::CdvToggleView,
+        Action::CdvResizeUp,
+        Action::CdvResizeDown,
+        Action::FindOpen,
+        Action::FindClose,
+        Action::FindNext,
+        Action::FindPrev,
+        Action::FindToggleCase,
+        Action::FindToggleRegex,
+        Action::FindToggleCdv,
+        Action::DialogConfirm,
+        Action::DialogCancel,
+        Action::CdvOpenUncommitted,
+        Action::CompareMark,
+        Action::CdvFileNext,
+        Action::CdvFilePrev,
+        Action::CdvFileViewDiff,
+        Action::CdvFileViewRevision,
+        Action::CdvFileToggleReviewed,
+        Action::CdvFolderCollapse,
+        Action::CdvFolderExpand,
+    ];
+}
+
 /// What [`reduce`] wants the caller to do next.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Outcome {

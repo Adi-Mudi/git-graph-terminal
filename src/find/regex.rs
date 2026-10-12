@@ -423,11 +423,6 @@ impl Regex {
         })
     }
 
-    /// Does the pattern match anywhere in `text`?
-    pub fn is_match(&self, text: &[char]) -> bool {
-        self.find_at(text, 0).is_some()
-    }
-
     /// Does a match start exactly at character offset `start`?
     ///
     /// The reference's `hash.search(pattern) === 0` test
@@ -762,7 +757,7 @@ mod tests {
     fn literals_match() {
         assert_eq!(matches("abc", "xxabcxx"), vec!["abc"]);
         assert_eq!(matches("abc", "xxabx"), Vec::<String>::new());
-        assert!(compile("abc").is_match(&ch("abc")));
+        assert_eq!(compile("abc").find_at(&ch("abc"), 0), Some((0, 3)));
     }
 
     #[test]
@@ -873,8 +868,9 @@ mod tests {
         let regex = compile("abc");
         assert_eq!(regex.match_at(&ch("abcdef"), 0), Some(3));
         assert_eq!(regex.match_at(&ch("xabcdef"), 0), None);
-        // The substring scope uses `is_match`, which searches anywhere.
-        assert!(regex.is_match(&ch("xabcdef")));
+        // The substring scope searches anywhere, so the same pattern matches at
+        // a non-zero offset when the anchor does not.
+        assert_eq!(regex.find_at(&ch("xabcdef"), 0), Some((1, 4)));
     }
 
     #[test]

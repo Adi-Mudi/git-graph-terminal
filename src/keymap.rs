@@ -446,4 +446,135 @@ mod tests {
             assert_eq!(action_for(event), None);
         }
     }
+
+    /// The key map that must claim a representative key (W7/T1 harness).
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Route {
+        Global,
+        Cdv,
+        Find,
+        Dialog,
+    }
+
+    /// The key that must produce `action`, and the map that must claim it.
+    ///
+    /// This is the W7/T1 regression harness: every [`Action`] variant needs a
+    /// row here, so an action that is never wired to a key fails a test instead
+    /// of only showing up when a pty session presses the key.
+    fn representative(action: Action) -> (Route, KeyEvent) {
+        use Action::*;
+        match action {
+            // The find widget owns these while it is open (W7/T2).
+            FindClose => (Route::Find, key(KeyCode::Esc)),
+            FindNext => (Route::Find, key(KeyCode::Enter)),
+            FindPrev => (Route::Find, modified(KeyCode::Enter, KeyModifiers::SHIFT)),
+            // The dialog owns these while it is open (W7/T1).
+            DialogConfirm => (Route::Dialog, key(KeyCode::Enter)),
+            DialogCancel => (Route::Dialog, key(KeyCode::Esc)),
+            // The focused CDV file list owns these (W7/T3).
+            CdvFileNext => (Route::Cdv, key(KeyCode::Char('j'))),
+            CdvFilePrev => (Route::Cdv, key(KeyCode::Char('k'))),
+            CdvFileViewDiff => (Route::Cdv, key(KeyCode::Enter)),
+            CdvFileViewRevision => (Route::Cdv, key(KeyCode::Char('o'))),
+            CdvFileToggleReviewed => (Route::Cdv, key(KeyCode::Char(' '))),
+            CdvFolderCollapse => (Route::Cdv, key(KeyCode::Left)),
+            CdvFolderExpand => (Route::Cdv, key(KeyCode::Right)),
+            // Everything else comes from the global map.
+            SelectNext => (Route::Global, key(KeyCode::Char('j'))),
+            SelectPrev => (Route::Global, key(KeyCode::Char('k'))),
+            PageNext => (Route::Global, key(KeyCode::PageDown)),
+            PagePrev => (Route::Global, key(KeyCode::PageUp)),
+            Top => (Route::Global, key(KeyCode::Home)),
+            Bottom => (Route::Global, key(KeyCode::End)),
+            ToggleExpand => (Route::Global, key(KeyCode::Enter)),
+            NextBranch => (Route::Global, key(KeyCode::Right)),
+            PrevBranch => (Route::Global, key(KeyCode::Left)),
+            StashNext => (Route::Global, key(KeyCode::Char('s'))),
+            StashPrev => (Route::Global, key(KeyCode::Char('S'))),
+            Refresh => (Route::Global, key(KeyCode::Char('r'))),
+            Quit => (Route::Global, key(KeyCode::Char('q'))),
+            CdvOpen => (Route::Global, key(KeyCode::Char('d'))),
+            CdvClose => (
+                Route::Global,
+                modified(KeyCode::Char('w'), KeyModifiers::CONTROL),
+            ),
+            CdvFocusToggle => (Route::Global, key(KeyCode::Tab)),
+            CdvToggleView => (Route::Global, key(KeyCode::Char('v'))),
+            CdvResizeUp => (Route::Global, key(KeyCode::Char('+'))),
+            CdvResizeDown => (Route::Global, key(KeyCode::Char('-'))),
+            FindOpen => (
+                Route::Global,
+                modified(KeyCode::Char('f'), KeyModifiers::CONTROL),
+            ),
+            FindToggleCase => (
+                Route::Global,
+                modified(KeyCode::Char('c'), KeyModifiers::ALT),
+            ),
+            FindToggleRegex => (
+                Route::Global,
+                modified(KeyCode::Char('r'), KeyModifiers::ALT),
+            ),
+            FindToggleCdv => (
+                Route::Global,
+                modified(KeyCode::Char('d'), KeyModifiers::ALT),
+            ),
+            CdvOpenUncommitted => (Route::Global, key(KeyCode::Char('u'))),
+            CompareMark => (Route::Global, key(KeyCode::Char('c'))),
+        }
+    }
+
+    /// Did `route` claim `key` for exactly `action`?
+    fn claimed(route: Route, key: KeyEvent, action: Action) -> bool {
+        match route {
+            Route::Global => action_for(key) == Some(action),
+            Route::Cdv => cdv_key_for(key) == Some(action),
+            Route::Find => {
+                let expected = match action {
+                    Action::FindClose => FindKey::Close,
+                    Action::FindNext => FindKey::Next,
+                    Action::FindPrev => FindKey::Prev,
+                    _ => return false,
+                };
+                find_key_for(key) == Some(expected)
+            }
+            Route::Dialog => {
+                let expected = if action == Action::DialogCancel {
+                    DialogKey::Escape
+                } else {
+                    DialogKey::Submit
+                };
+                dialog_key_for(key) == Some(expected)
+            }
+        }
+    }
+
+    /// W7/T1 harness: every [`Action`] must be reachable from a key.
+    #[test]
+    fn every_action_is_reachable_from_a_key() {
+        for &action in Action::ALL {
+            let (route, event) = representative(action);
+            assert!(
+                claimed(route, event, action),
+                "{action:?} is unreachable: {event:?} on the {route:?} map did not produce it"
+            );
+        }
+    }
+
+    /// The pager's own map has the same guarantee (W7/T3).
+    #[test]
+    fn every_pager_nav_is_reachable_from_a_key() {
+        let table = [
+            (key(KeyCode::Char('j')), PagerNav::LineDown),
+            (key(KeyCode::Char('k')), PagerNav::LineUp),
+            (key(KeyCode::PageDown), PagerNav::PageDown),
+            (key(KeyCode::PageUp), PagerNav::PageUp),
+            (key(KeyCode::Home), PagerNav::Top),
+            (key(KeyCode::End), PagerNav::Bottom),
+            (key(KeyCode::Char('q')), PagerNav::Close),
+            (key(KeyCode::Esc), PagerNav::Close),
+        ];
+        for (event, expected) in table {
+            assert_eq!(pager_nav_for(event), Some(expected));
+        }
+    }
 }
