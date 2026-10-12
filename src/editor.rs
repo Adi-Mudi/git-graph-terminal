@@ -13,6 +13,16 @@
 use std::io;
 use std::path::PathBuf;
 use std::process::{Command, ExitStatus};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Hands every `stage` call its own temp-file suffix.
+///
+/// `std::process::id()` alone cannot keep two calls apart: every test in one
+/// binary shares the pid, so two tests staging the same label computed the same
+/// path and one test's `cleanup` deleted the other's file mid-read (CI run
+/// 38300733488). A counter is per *call*, which is the unit that actually needs
+/// the path to itself.
+static NEXT_STAGE: AtomicU64 = AtomicU64::new(0);
 
 /// The environment variable that turns the fallback on.
 pub const ENV_VAR: &str = "GGT_EDITOR";
@@ -72,7 +82,10 @@ pub fn plan_argv(program: &str, old_file: &str, new_file: &str) -> Vec<String> {
 ///
 /// The files land in the OS temp directory under a `ggt-diff-` prefix so a
 /// crash leaves nothing inside the repository. `label` (a file path) is folded
-/// into the names to make them recognisable in the editor's tab line.
+/// into the names to make them recognisable in the editor's tab line, and a
+/// per-call sequence number guarantees two calls never share a path — two tests
+/// staging the same label used to collide, and one `cleanup` would delete the
+/// other's file.
 pub fn stage(
     program: &str,
     label: &str,
@@ -90,9 +103,10 @@ pub fn stage(
         })
         .collect();
     let pid = std::process::id();
+    let seq = NEXT_STAGE.fetch_add(1, Ordering::Relaxed);
     let dir = std::env::temp_dir();
-    let old_file = dir.join(format!("ggt-diff-{pid}-{safe}.old"));
-    let new_file = dir.join(format!("ggt-diff-{pid}-{safe}.new"));
+    let old_file = dir.join(format!("ggt-diff-{pid}-{seq}-{safe}.old"));
+    let new_file = dir.join(format!("ggt-diff-{pid}-{seq}-{safe}.new"));
     std::fs::write(&old_file, old_content)?;
     std::fs::write(&new_file, new_content)?;
     let argv = plan_argv(
@@ -153,6 +167,29 @@ mod tests {
         cleanup(&plan);
         assert!(!plan.old_file.exists());
         assert!(!plan.new_file.exists());
+    }
+
+    /// Two calls in one process must not collide on one temp path — the exact
+    /// shape of the CI failure in run 38300733488, where a second test's
+    /// `cleanup` removed the first test's file between its `stage` and its read.
+    #[test]
+    fn two_stages_in_one_process_never_share_a_path() {
+        let first = stage("nvim", "f.txt", "a\n", "b\n").unwrap();
+        let second = stage("nvim", "f.txt", "a\n", "b\n").unwrap();
+
+        assert_ne!(
+            first.old_file, second.old_file,
+            "two calls must not share an old-side path"
+        );
+        assert_ne!(first.new_file, second.new_file);
+
+        // The failing case was a read *after* another call had staged, so read
+        // the first pair last.
+        assert_eq!(std::fs::read_to_string(&first.old_file).unwrap(), "a\n");
+        assert_eq!(std::fs::read_to_string(&first.new_file).unwrap(), "b\n");
+
+        cleanup(&first);
+        cleanup(&second);
     }
 
     #[test]
