@@ -113,6 +113,9 @@ pub struct CdvState {
     pub reviewed: Vec<String>,
     /// `expandedCommit.lastViewedFile`.
     pub last_viewed_file: Option<String>,
+    /// The configured external diff tool (`git config diff.tool` /
+    /// `gui.difftool`), or `None` when neither is set (VIS-051, W7/T4).
+    pub external_diff: Option<String>,
     /// Cursor row into [`CdvState::file_rows`] (W7/T3) — the file-row menu's
     /// selected row, so A65–A68 can act on it.
     pub selected: usize,
@@ -142,6 +145,7 @@ impl CdvState {
             closed_folders: Vec::new(),
             reviewed: Vec::new(),
             last_viewed_file: None,
+            external_diff: None,
             selected: 0,
             scroll: 0,
             height: DEFAULT_HEIGHT,
@@ -166,6 +170,7 @@ impl CdvState {
             closed_folders: Vec::new(),
             reviewed: Vec::new(),
             last_viewed_file: None,
+            external_diff: None,
             selected: 0,
             scroll: 0,
             height: DEFAULT_HEIGHT,
@@ -190,6 +195,7 @@ impl CdvState {
             closed_folders: Vec::new(),
             reviewed: Vec::new(),
             last_viewed_file: None,
+            external_diff: None,
             selected: 0,
             scroll: 0,
             height: DEFAULT_HEIGHT,
@@ -214,6 +220,7 @@ impl CdvState {
             closed_folders: Vec::new(),
             reviewed: Vec::new(),
             last_viewed_file: None,
+            external_diff: None,
             selected: 0,
             scroll: 0,
             height: DEFAULT_HEIGHT,
@@ -234,6 +241,30 @@ impl CdvState {
     pub fn failed(&mut self, message: &str) {
         self.loading = false;
         self.error = Some(message.to_string());
+    }
+
+    /// Record the file list for a panel that has no commit summary
+    /// (`CdvKind::Uncommitted` / `CdvKind::Comparison`, W7/T4).
+    pub fn loaded_changes(&mut self, changes: Vec<GitFileChange>) {
+        self.tree = FileTree::build(&changes);
+        self.changes = changes;
+        self.loading = false;
+        self.error = None;
+        self.clamp_selection();
+    }
+
+    /// Is the external diff action available? (VIS-051)
+    ///
+    /// This is `externalDiffPossible` (`web/main.ts:2521`): a loaded panel whose
+    /// comparison or commit actually has a left-hand side to diff against.
+    pub fn external_diff_available(&self) -> bool {
+        let has_left_side = self.compare_with.is_some()
+            || self
+                .detail
+                .as_ref()
+                .map(|detail| !detail.parents.is_empty())
+                .unwrap_or(false);
+        !self.loading && has_left_side
     }
 
     /// Toggle Tree ↔ List (VIS-041 / VIS-042).
@@ -619,6 +650,14 @@ impl CdvState {
         );
         if let Some(compare) = &self.compare_with {
             line.push_str(&format!(" compare-with {compare}"));
+        }
+        // VIS-051: the reference enables `#cdvExternalDiff` when a tool is
+        // configured; a terminal has no GUI editor, so the port shows the tool
+        // name it would have launched.
+        if self.external_diff_available() {
+            if let Some(tool) = &self.external_diff {
+                line.push_str(&format!(" · external diff: {tool}"));
+            }
         }
         line
     }

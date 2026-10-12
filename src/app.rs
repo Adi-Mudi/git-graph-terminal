@@ -114,6 +114,8 @@ pub struct AppState {
     pub dialog: Option<Dialog>,
     /// The open read-only pager, if any (W7/T3). While `Some`, it owns the keyboard.
     pub pager: Option<crate::pager::Pager>,
+    /// The commit row marked as the comparison base (`c`, VIS-040, W7/T4).
+    pub compare_base: Option<RowIdx>,
     /// The row selected before the find widget opened, restored on `Esc`
     /// (W7/T2: `findWidget.ts:139-158` `restoreState`).
     pub selection_before_find: Option<RowIdx>,
@@ -181,6 +183,11 @@ pub enum Action {
     DialogConfirm,
     /// Dismiss the open dialog — `Esc`.
     DialogCancel,
+    /// Open the uncommitted-changes CDV — `u` (VIS-039, W7/T4).
+    CdvOpenUncommitted,
+    /// Mark/unmark the selected commit as the comparison base — `c` (VIS-040).
+    /// Pressing `c` on the already-marked row opens the comparison CDV.
+    CompareMark,
     /// Move the CDV file-row cursor down — `j` / Down while the CDV is focused
     /// (W7/T3).
     CdvFileNext,
@@ -431,6 +438,7 @@ impl AppState {
             find: FindWidget::new(),
             dialog: None,
             pager: None,
+            compare_base: None,
             selection_before_find: None,
         }
     }
@@ -867,6 +875,10 @@ pub fn reduce(state: &mut AppState, action: Action, repo: &Path) -> Outcome {
         Action::CdvFileToggleReviewed => cdv_toggle_reviewed(state),
         Action::CdvFolderCollapse => cdv_set_folder(state, false),
         Action::CdvFolderExpand => cdv_set_folder(state, true),
+
+        // W7/T4 — the uncommitted and comparison CDV kinds.
+        Action::CdvOpenUncommitted => open_uncommitted_cdv(state, repo),
+        Action::CompareMark => compare_mark(state, repo),
     }
     state.sync_status();
     state.ensure_visible();
@@ -928,7 +940,88 @@ pub fn open_cdv(state: &mut AppState, repo: &Path) {
         },
         Err(error) => cdv.failed(&error.to_string()),
     }
+    cdv.external_diff = files::external_diff_tool(repo);
     state.cdv = Some(cdv);
+}
+
+/* ------------------------------------------------------------------ */
+/* W7/T4 — the uncommitted and comparison CDV kinds                    */
+/* ------------------------------------------------------------------ */
+
+/// `u` — open the uncommitted-changes CDV (VIS-039).
+///
+/// The reference inserts a virtual uncommitted row at the top of the table only
+/// when the working tree has changes (`src/dataSource.ts:189-192`). `data.rs`
+/// does not model that row, so the panel is anchored at row `0` — the position
+/// the virtual row would take — and an empty working tree leaves the panel
+/// closed and says so, which is the same precondition the reference row has.
+pub fn open_uncommitted_cdv(state: &mut AppState, repo: &Path) {
+    let changes = match files::working_tree_changes(repo) {
+        Ok(changes) => changes,
+        Err(error) => {
+            state.status.last_action = Some(format!("uncommitted changes: {error}"));
+            return;
+        }
+    };
+    if changes.is_empty() {
+        state.status.last_action = Some("No uncommitted changes.".to_string());
+        state.dialog = Some(Dialog::message(
+            "Uncommitted Changes",
+            vec!["There are no uncommitted changes to display.".to_string()],
+        ));
+        return;
+    }
+    let mut cdv = CdvState::uncommitted(0, Vec::new());
+    cdv.loaded_changes(changes);
+    cdv.external_diff = files::external_diff_tool(repo);
+    state.cdv = Some(cdv);
+    state.cdv_focused = true;
+}
+
+/// `c` — mark the selected commit as the comparison base, or open the
+/// comparison when the base is already marked (VIS-040).
+///
+/// The reference sets `compareWithHash` from the commit menu and opens the
+/// comparison on the second commit; the terminal port keeps the base in
+/// [`AppState::compare_base`] so the same two-step gesture works from the
+/// keyboard. Pressing `c` twice on the same row clears the mark.
+pub fn compare_mark(state: &mut AppState, repo: &Path) {
+    let row = state.selected;
+    if state.compare_base == Some(row) {
+        state.compare_base = None;
+        state.status.last_action = Some("comparison cleared".to_string());
+        return;
+    }
+    match state.compare_base.take() {
+        None => {
+            state.compare_base = Some(row);
+            state.status.last_action = Some(format!("marked row {} for comparison", row + 1));
+        }
+        Some(base) => open_comparison_cdv(state, repo, base, row),
+    }
+}
+
+/// Load the comparison CDV for two rows.
+///
+/// `getCommitOrder` (`web/main.ts:2843-2849`) makes the **older** commit the
+/// diff's `from` side; in table order the older commit is the larger row index.
+fn open_comparison_cdv(state: &mut AppState, repo: &Path, a: RowIdx, b: RowIdx) {
+    let (Some(left), Some(right)) = (
+        state.rows.get(a as usize).map(|c| c.hash.clone()),
+        state.rows.get(b as usize).map(|c| c.hash.clone()),
+    ) else {
+        return;
+    };
+    let (from, to) = if a > b { (left, right) } else { (right, left) };
+    let mut cdv = CdvState::comparison(state.selected, &from, &to, Vec::new());
+    match files::comparison_changes(repo, &from, &to) {
+        Ok(changes) => cdv.loaded_changes(changes),
+        Err(error) => cdv.failed(&error.to_string()),
+    }
+    cdv.external_diff = files::external_diff_tool(repo);
+    state.cdv = Some(cdv);
+    state.cdv_focused = true;
+    state.status.last_action = Some(format!("comparing {from} to {to}"));
 }
 
 /// Close the panel when it belongs to `row` (collapsing that row).

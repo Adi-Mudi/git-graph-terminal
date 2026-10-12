@@ -123,9 +123,22 @@ impl GitFileChange {
 /// The leading field of the payload is the commit hash, which is skipped — the
 /// same `lines.shift()` the reference does (`src/dataSource.ts:1789`).
 pub fn parse_raw(output: &str) -> Vec<(GitFileStatus, String, String, bool)> {
+    parse_raw_at(output, 1)
+}
+
+/// Parse a `git diff --raw -z` payload.
+///
+/// Unlike `git diff-tree`, a plain `git diff` has no leading commit-hash field,
+/// so the reference only shifts the first line for the `diff-tree` form
+/// (`src/dataSource.ts:1786`).
+pub fn parse_raw_diff(output: &str) -> Vec<(GitFileStatus, String, String, bool)> {
+    parse_raw_at(output, 0)
+}
+
+fn parse_raw_at(output: &str, start: usize) -> Vec<(GitFileStatus, String, String, bool)> {
     let parts: Vec<&str> = output.split('\0').collect();
     let mut records = Vec::new();
-    let mut i = 1; // 0 = commit hash
+    let mut i = start;
     while i < parts.len() {
         let header = parts[i];
         if !header.starts_with(':') {
@@ -169,9 +182,18 @@ pub fn parse_raw(output: &str) -> Vec<(GitFileStatus, String, String, bool)> {
 
 /// Parse the `--numstat -z` payload into `(path, additions, deletions)` records.
 pub fn parse_numstat(output: &str) -> Vec<(String, Option<u32>, Option<u32>)> {
+    parse_numstat_at(output, 1)
+}
+
+/// Parse a `git diff --numstat -z` payload (no leading commit-hash field).
+pub fn parse_numstat_diff(output: &str) -> Vec<(String, Option<u32>, Option<u32>)> {
+    parse_numstat_at(output, 0)
+}
+
+fn parse_numstat_at(output: &str, start: usize) -> Vec<(String, Option<u32>, Option<u32>)> {
     let parts: Vec<&str> = output.split('\0').collect();
     let mut records = Vec::new();
-    let mut i = 1; // 0 = commit hash
+    let mut i = start;
     while i < parts.len() {
         let fields: Vec<&str> = parts[i].split('\t').collect();
         if fields.len() != 3 {
@@ -223,6 +245,88 @@ pub fn merge_changes(
     changes
 }
 
+/// `generateFileChanges` (`src/dataSource.ts:1849-1881`) with the working-tree
+/// status overlay.
+///
+/// The name-status rows define the list and the numstat lookup fills the counts
+/// (that part is [`merge_changes`]); the `git status` overlay then re-types the
+/// paths it reports as deleted and appends the untracked ones.
+pub fn merge_changes_with_status(
+    status_records: &[(GitFileStatus, String, String, bool)],
+    numstat: &[(String, Option<u32>, Option<u32>)],
+    deleted: &[String],
+    untracked: &[String],
+) -> Vec<GitFileChange> {
+    let mut changes = merge_changes(status_records, numstat);
+    let mut lookup: std::collections::HashMap<String, usize> = changes
+        .iter()
+        .enumerate()
+        .map(|(index, change)| (change.new_path.clone(), index))
+        .collect();
+
+    for path in deleted {
+        match lookup.get(path) {
+            Some(&index) => changes[index].status = GitFileStatus::Deleted,
+            None => {
+                lookup.insert(path.clone(), changes.len());
+                changes.push(GitFileChange {
+                    old_path: path.clone(),
+                    new_path: path.clone(),
+                    status: GitFileStatus::Deleted,
+                    additions: None,
+                    deletions: None,
+                    submodule: false,
+                });
+            }
+        }
+    }
+    for path in untracked {
+        lookup.insert(path.clone(), changes.len());
+        changes.push(GitFileChange {
+            old_path: path.clone(),
+            new_path: path.clone(),
+            status: GitFileStatus::Untracked,
+            additions: None,
+            deletions: None,
+            submodule: false,
+        });
+    }
+    changes
+}
+
+/// `getStatus` (`src/dataSource.ts:1712-1737`): the deleted and untracked paths
+/// in a `git status -s --porcelain -z` payload.
+///
+/// A rename/copy entry carries the destination in the following NUL field, so
+/// the index steps by two for `R`/`C` just like the reference does.
+pub fn parse_status(output: &str) -> (Vec<String>, Vec<String>) {
+    let mut deleted = Vec::new();
+    let mut untracked = Vec::new();
+    let parts: Vec<&str> = output.split('\0').collect();
+    let mut i = 0;
+    while i < parts.len() && !parts[i].is_empty() {
+        let entry = parts[i];
+        if entry.len() < 4 {
+            break;
+        }
+        let path = entry[3..].to_string();
+        let mut chars = entry.chars();
+        let c1 = chars.next().unwrap_or(' ');
+        let c2 = chars.next().unwrap_or(' ');
+        if c1 == 'D' || c2 == 'D' {
+            deleted.push(path);
+        } else if c1 == '?' || c2 == '?' {
+            untracked.push(path);
+        }
+        if matches!(c1, 'R' | 'C') || matches!(c2, 'R' | 'C') {
+            i += 2;
+        } else {
+            i += 1;
+        }
+    }
+    (deleted, untracked)
+}
+
 /// The reference's `--diff-filter` default (`src/dataSource.ts:1465`).
 pub const DIFF_FILTER: &str = "AMDR";
 
@@ -256,6 +360,89 @@ pub fn commit_file_changes(repo: &Path, hash: &str) -> Result<Vec<GitFileChange>
         ],
     )?;
     Ok(merge_changes(&parse_raw(&raw), &parse_numstat(&numstat)))
+}
+
+/// The uncommitted working-tree changes for the CDV.
+///
+/// This is `getUncommittedDetails` (`src/dataSource.ts:396-414`): `git diff
+/// HEAD` for the tracked rows plus `git status --porcelain` for the
+/// deleted/untracked overlay. `--untracked-files=all` matches the reference's
+/// default `showUntrackedFiles: true` (`src/config.ts`).
+pub fn working_tree_changes(repo: &Path) -> Result<Vec<GitFileChange>, GitError> {
+    let filter = format!("--diff-filter={DIFF_FILTER}");
+    let raw = run_git(
+        repo,
+        &["diff", "--raw", "--find-renames", &filter, "-z", "HEAD"],
+    )?;
+    let numstat = run_git(
+        repo,
+        &["diff", "--numstat", "--find-renames", &filter, "-z", "HEAD"],
+    )?;
+    let status = run_git(
+        repo,
+        &["status", "-s", "--untracked-files=all", "--porcelain", "-z"],
+    )?;
+    let (deleted, untracked) = parse_status(&status);
+    Ok(merge_changes_with_status(
+        &parse_raw_diff(&raw),
+        &parse_numstat_diff(&numstat),
+        &deleted,
+        &untracked,
+    ))
+}
+
+/// The changed files between two revisions (`getCommitComparison`,
+/// `src/dataSource.ts:423-434`).
+///
+/// When `to` is `UNCOMMITTED` the right-hand side is the working tree, so the
+/// diff carries no right ref and the `git status` overlay is merged in instead —
+/// the same two branches the reference takes.
+pub fn comparison_changes(
+    repo: &Path,
+    from: &str,
+    to: &str,
+) -> Result<Vec<GitFileChange>, GitError> {
+    let filter = format!("--diff-filter={DIFF_FILTER}");
+    let uncommitted = to == crate::data::UNCOMMITTED;
+    let mut raw_args = vec!["diff", "--raw", "--find-renames", &filter, "-z", from];
+    let mut numstat_args = vec!["diff", "--numstat", "--find-renames", &filter, "-z", from];
+    if !uncommitted {
+        raw_args.push(to);
+        numstat_args.push(to);
+    }
+    let raw = run_git(repo, &raw_args)?;
+    let numstat = run_git(repo, &numstat_args)?;
+    let (deleted, untracked) = if uncommitted {
+        let status = run_git(
+            repo,
+            &["status", "-s", "--untracked-files=all", "--porcelain", "-z"],
+        )?;
+        parse_status(&status)
+    } else {
+        (Vec::new(), Vec::new())
+    };
+    Ok(merge_changes_with_status(
+        &parse_raw_diff(&raw),
+        &parse_numstat_diff(&numstat),
+        &deleted,
+        &untracked,
+    ))
+}
+
+/// The configured external diff tool (VIS-051).
+///
+/// `gitConfig.diffTool` / `guiDiffTool` come from the consolidated `git config`
+/// read (`src/dataSource.ts:311-312`); `gui.difftool` wins when both are set,
+/// exactly as `renderCdvExternalDiffBtn` picks its title
+/// (`web/main.ts:3123-3125`).
+pub fn external_diff_tool(repo: &Path) -> Option<String> {
+    let read = |key: &str| {
+        run_git(repo, &["config", "--get", key])
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    };
+    read("gui.difftool").or_else(|| read("diff.tool"))
 }
 
 /// The reference's `--format` for the CDV summary (`src/dataSource.ts:106-110`).

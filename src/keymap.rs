@@ -247,6 +247,12 @@ pub fn action_for(key: KeyEvent) -> Option<Action> {
         KeyCode::Char('+') | KeyCode::Char('=') => Some(Action::CdvResizeUp),
         KeyCode::Char('-') | KeyCode::Char('_') => Some(Action::CdvResizeDown),
 
+        // W7/T4 — the uncommitted and comparison CDV kinds. The reference opens
+        // both from the table (the virtual uncommitted row, and `compareWithHash`
+        // set from the commit menu), so a terminal needs keys for them.
+        KeyCode::Char('u') if !ctrl => Some(Action::CdvOpenUncommitted),
+        KeyCode::Char('c') => Some(Action::CompareMark),
+
         // Branch nav: Right = first parent, Left = first child; Ctrl+Down/Up are aliases.
         KeyCode::Right => Some(Action::NextBranch),
         KeyCode::Left => Some(Action::PrevBranch),
