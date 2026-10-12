@@ -178,13 +178,23 @@ pub fn parse_raw(output: &str) -> Vec<(GitFileStatus, String, String, bool)> {
             if i + 1 >= parts.len() {
                 break;
             }
-            records.push((status, parts[i].to_string(), parts[i + 1].to_string(), submodule));
+            records.push((
+                status,
+                parts[i].to_string(),
+                parts[i + 1].to_string(),
+                submodule,
+            ));
             i += 2;
         } else {
             if i >= parts.len() {
                 break;
             }
-            records.push((status, parts[i].to_string(), parts[i].to_string(), submodule));
+            records.push((
+                status,
+                parts[i].to_string(),
+                parts[i].to_string(),
+                submodule,
+            ));
             i += 1;
         }
     }
@@ -578,7 +588,12 @@ fn walk(
             Node::File(index) => {
                 let change = &changes[*index];
                 let label = file_name(change).to_string();
-                out.push(FileRow::file(depth, label, change.path().to_string(), *index));
+                out.push(FileRow::file(
+                    depth,
+                    label,
+                    change.path().to_string(),
+                    *index,
+                ));
             }
             Node::Folder(child_folder) => {
                 // Collapse `a` → `b` → `c` while each has exactly one folder child.
@@ -695,7 +710,10 @@ mod tests {
         assert_eq!(changes[1].path(), "src/old.rs");
         assert!(changes[1].diff_possible());
         // Rename label is the reference's `Renamed (old → new)`.
-        assert_eq!(changes[2].change_label(), "Renamed (src/from.rs → src/to.rs)");
+        assert_eq!(
+            changes[2].change_label(),
+            "Renamed (src/from.rs → src/to.rs)"
+        );
         // Binary: `-`/`-` numstat → not diff-possible, binary title.
         assert!(changes[4].binary());
         assert!(!changes[4].diff_possible());
@@ -723,15 +741,7 @@ mod tests {
         let labels: Vec<&str> = rows.iter().map(|row| row.label.as_str()).collect();
         assert_eq!(
             labels,
-            vec![
-                "src",
-                "main.rs",
-                "new.rs",
-                "old.rs",
-                "to.rs",
-                "sub",
-                "module",
-            ]
+            vec!["src", "main.rs", "new.rs", "old.rs", "to.rs", "sub", "module",]
         );
         assert_eq!(rows[0].depth, 0);
         assert_eq!(rows[1].depth, 1);

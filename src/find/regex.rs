@@ -265,7 +265,9 @@ impl<'a> Parser<'a> {
                         }
                         Some(mark @ ('=' | '!' | '<')) => {
                             return Err(err(
-                                format!("look-around and named groups are not supported ('(?{mark}')"),
+                                format!(
+                                    "look-around and named groups are not supported ('(?{mark}')"
+                                ),
                                 at,
                             ))
                         }
@@ -670,7 +672,12 @@ impl Regex {
 
 impl fmt::Display for Regex {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "/{}/{}", self.source, if self.case_insensitive { "i" } else { "" })
+        write!(
+            f,
+            "/{}/{}",
+            self.source,
+            if self.case_insensitive { "i" } else { "" }
+        )
     }
 }
 
@@ -683,14 +690,16 @@ fn is_word(c: char) -> bool {
 fn is_space(c: char) -> bool {
     matches!(
         c,
-        ' ' | '\t' | '\n' | '\r' | '\u{b}' | '\u{c}' | '\u{a0}' | '\u{feff}'
+        ' ' | '\t'
+            | '\n'
+            | '\r'
+            | '\u{b}'
+            | '\u{c}'
+            | '\u{a0}'
+            | '\u{feff}'
             | '\u{1680}'
-            | '\u{2000}'..='\u{200a}'
-            | '\u{2028}'
-            | '\u{2029}'
-            | '\u{202f}'
-            | '\u{205f}'
-            | '\u{3000}'
+            | '\u{2000}'
+            ..='\u{200a}' | '\u{2028}' | '\u{2029}' | '\u{202f}' | '\u{205f}' | '\u{3000}'
     )
 }
 
@@ -721,9 +730,7 @@ pub fn literal_find_all(
     if needle.is_empty() || needle.len() > haystack.len() {
         return Vec::new();
     }
-    let eq = |a: char, b: char| {
-        a == b || (fold_case && a.to_lowercase().eq(b.to_lowercase()))
-    };
+    let eq = |a: char, b: char| a == b || (fold_case && a.to_lowercase().eq(b.to_lowercase()));
     (0..=haystack.len() - needle.len())
         .filter(|start| {
             needle
@@ -785,7 +792,11 @@ mod tests {
     #[test]
     fn alternation_picks_the_leftmost_branch_that_matches() {
         assert_eq!(matches("cat|dog", "a dog and a cat"), vec!["dog", "cat"]);
-        assert_eq!(matches("ab|abc", "abc"), vec!["ab"], "leftmost-first, not longest");
+        assert_eq!(
+            matches("ab|abc", "abc"),
+            vec!["ab"],
+            "leftmost-first, not longest"
+        );
     }
 
     #[test]
@@ -916,21 +927,41 @@ mod tests {
     #[test]
     fn unclosed_constructs_report_a_clear_message() {
         let group = Regex::new_with_flags("(abc", false).expect_err("must fail");
-        assert!(group.message.contains("unclosed group"), "{}", group.message);
+        assert!(
+            group.message.contains("unclosed group"),
+            "{}",
+            group.message
+        );
         let class = Regex::new_with_flags("[abc", false).expect_err("must fail");
-        assert!(class.message.contains("unclosed character class"), "{}", class.message);
+        assert!(
+            class.message.contains("unclosed character class"),
+            "{}",
+            class.message
+        );
         let close = Regex::new_with_flags("abc)", false).expect_err("must fail");
         assert!(close.message.contains("unmatched ')'"), "{}", close.message);
         let repeat = Regex::new_with_flags("*abc", false).expect_err("must fail");
-        assert!(repeat.message.contains("nothing to repeat"), "{}", repeat.message);
+        assert!(
+            repeat.message.contains("nothing to repeat"),
+            "{}",
+            repeat.message
+        );
     }
 
     #[test]
     fn unsupported_constructs_say_so_instead_of_mis_matching() {
         let backref = Regex::new_with_flags(r"(a)\1", false).expect_err("must fail");
-        assert!(backref.message.contains("back-reference"), "{}", backref.message);
+        assert!(
+            backref.message.contains("back-reference"),
+            "{}",
+            backref.message
+        );
         let lookahead = Regex::new_with_flags("a(?=b)", false).expect_err("must fail");
-        assert!(lookahead.message.contains("look-around"), "{}", lookahead.message);
+        assert!(
+            lookahead.message.contains("look-around"),
+            "{}",
+            lookahead.message
+        );
     }
 
     #[test]
@@ -972,7 +1003,10 @@ mod tests {
     #[test]
     fn literal_find_all_reports_character_offsets_not_bytes() {
         // "héllo" — the `é` is two bytes but one character.
-        assert_eq!(literal_find_all(&ch("héllo"), &ch("llo"), false), vec![(2, 5)]);
+        assert_eq!(
+            literal_find_all(&ch("héllo"), &ch("llo"), false),
+            vec![(2, 5)]
+        );
     }
 
     #[test]
@@ -983,4 +1017,3 @@ mod tests {
         assert!(!is_space('x'));
     }
 }
-

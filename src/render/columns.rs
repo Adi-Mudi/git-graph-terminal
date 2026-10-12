@@ -176,11 +176,7 @@ fn commit_row(
         cells.push(TuiCell::from(highlighted(&commit.author, author, find)));
     }
     if columns.commit {
-        cells.push(TuiCell::from(highlighted(
-            &commit.subject,
-            row_tint,
-            find,
-        )));
+        cells.push(TuiCell::from(highlighted(&commit.subject, row_tint, find)));
     }
     cells.push(TuiCell::from(highlighted(
         &commit.refs.join(", "),

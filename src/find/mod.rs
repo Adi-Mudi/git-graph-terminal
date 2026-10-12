@@ -51,7 +51,8 @@ use crate::render::columns::short_date;
 use regex::{literal_find_all, Regex};
 
 /// The reference's rejection text, verbatim (`web/findWidget.ts:300`).
-pub const ZERO_LENGTH_MESSAGE: &str = "Cannot use a regular expression which has zero length matches";
+pub const ZERO_LENGTH_MESSAGE: &str =
+    "Cannot use a regular expression which has zero length matches";
 
 /// One matched commit row.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -376,7 +377,9 @@ impl FindWidget {
         if self.position < 0 {
             return None;
         }
-        self.matches.get(self.position as usize).map(|found| found.row)
+        self.matches
+            .get(self.position as usize)
+            .map(|found| found.row)
     }
 
     /// `updatePosition`'s counter text (`findWidget.ts:355`).
@@ -607,7 +610,10 @@ mod tests {
     #[test]
     fn regex_mode_uses_the_engine() {
         assert_eq!(matched_rows(&scan("^aaaa", true, true)), vec![0]);
-        assert_eq!(matched_rows(&scan("(compiler|machine)", true, false)), vec![1, 2]);
+        assert_eq!(
+            matched_rows(&scan("(compiler|machine)", true, false)),
+            vec![1, 2]
+        );
         assert_eq!(matched_rows(&scan(r"\d{4}-11-14", true, false)), vec![0]);
     }
 
@@ -708,7 +714,12 @@ mod tests {
             visible: true,
             ..Default::default()
         };
-        widget.set_text("compiler".to_string(), &rows(), &ColumnState::default(), None);
+        widget.set_text(
+            "compiler".to_string(),
+            &rows(),
+            &ColumnState::default(),
+            None,
+        );
         assert_eq!(matched_rows(&widget), vec![1]);
         widget.set_text(String::new(), &rows(), &ColumnState::default(), None);
         assert!(widget.matches.is_empty());
@@ -802,7 +813,10 @@ mod tests {
             "refs/stash".to_string(),
         ];
         let (heads, remotes, tags, stash) = branch_labels(&refs);
-        assert_eq!(heads.iter().map(|h| h.name.as_str()).collect::<Vec<_>>(), vec!["main"]);
+        assert_eq!(
+            heads.iter().map(|h| h.name.as_str()).collect::<Vec<_>>(),
+            vec!["main"]
+        );
         assert_eq!(
             remotes.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(),
             vec!["origin/main"]
@@ -818,4 +832,3 @@ mod tests {
         assert_eq!(stash_selector("  refs/stash  "), "stash@{0}");
     }
 }
-

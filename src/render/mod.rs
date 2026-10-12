@@ -294,10 +294,7 @@ fn dialog_lines(dialog: &Dialog) -> Vec<Line<'static>> {
         .collect();
     lines.push(Line::from(buttons));
     if let Some(error) = &dialog.error {
-        lines.push(Line::styled(
-            error.clone(),
-            Style::default().fg(Color::Red),
-        ));
+        lines.push(Line::styled(error.clone(), Style::default().fg(Color::Red)));
     }
     lines
 }

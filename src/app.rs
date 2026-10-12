@@ -899,9 +899,12 @@ fn resize_cdv(state: &mut AppState, delta: i32) {
 pub fn recompute_find(state: &mut AppState) {
     let previous = state.find.current_hash().map(str::to_string);
     let uncommitted = None;
-    state
-        .find
-        .recompute(&state.rows, &state.columns, uncommitted, previous.as_deref());
+    state.find.recompute(
+        &state.rows,
+        &state.columns,
+        uncommitted,
+        previous.as_deref(),
+    );
 }
 
 /// Move to the next/previous match and follow it with the selection.

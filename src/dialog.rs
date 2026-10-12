@@ -220,7 +220,10 @@ pub enum DialogValue {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DialogResult {
     /// The user submitted; `button` is the index into [`Dialog::buttons`].
-    Submit { values: Vec<DialogValue>, button: usize },
+    Submit {
+        values: Vec<DialogValue>,
+        button: usize,
+    },
     /// The user pressed `Escape` (`dialog.ts:369-380`).
     Cancel,
 }
@@ -282,7 +285,12 @@ impl Dialog {
     ///
     /// `confirm_label` names the action (`"Delete Branch"`), matching the
     /// reference's `showConfirmation(message, actionName, …)`.
-    pub fn confirm(title: &str, body: Vec<String>, confirm_label: &str, pending: PendingPlan) -> Self {
+    pub fn confirm(
+        title: &str,
+        body: Vec<String>,
+        confirm_label: &str,
+        pending: PendingPlan,
+    ) -> Self {
         Dialog {
             title: title.to_string(),
             body,
@@ -681,7 +689,10 @@ mod tests {
             pending(RefAction::AddRemote, ActionTarget::default()),
         );
         assert_eq!(dialog.focusable_count(), 4); // 2 fields + 2 buttons
-        assert_eq!(dialog.focused_field().map(|f| f.name.as_str()), Some("name"));
+        assert_eq!(
+            dialog.focused_field().map(|f| f.name.as_str()),
+            Some("name")
+        );
         dialog.handle(DialogKey::Next);
         assert_eq!(dialog.focused_field().map(|f| f.name.as_str()), Some("url"));
         dialog.handle(DialogKey::Next);
@@ -744,7 +755,11 @@ mod tests {
         );
         assert_eq!(dialog.handle(DialogKey::Submit), None);
         assert!(
-            dialog.error.as_deref().unwrap_or("").contains("cannot be empty"),
+            dialog
+                .error
+                .as_deref()
+                .unwrap_or("")
+                .contains("cannot be empty"),
             "{:?}",
             dialog.error
         );
@@ -811,7 +826,12 @@ mod tests {
         let mut dialog = Dialog::form(
             "Reset",
             vec![],
-            vec![Field::select("reset_mode", "Reset Mode", &["Soft", "Mixed", "Hard"], 1)],
+            vec![Field::select(
+                "reset_mode",
+                "Reset Mode",
+                &["Soft", "Mixed", "Hard"],
+                1,
+            )],
             "Reset",
             pending(RefAction::ResetToCommit, branch_target()),
         );
@@ -819,11 +839,19 @@ mod tests {
         dialog.handle(DialogKey::Right);
         assert_eq!(dialog.fields[0].display_value(), "Hard");
         dialog.handle(DialogKey::Right);
-        assert_eq!(dialog.fields[0].display_value(), "Hard", "clamps at the end");
+        assert_eq!(
+            dialog.fields[0].display_value(),
+            "Hard",
+            "clamps at the end"
+        );
         dialog.handle(DialogKey::Left);
         dialog.handle(DialogKey::Left);
         dialog.handle(DialogKey::Left);
-        assert_eq!(dialog.fields[0].display_value(), "Soft", "clamps at the start");
+        assert_eq!(
+            dialog.fields[0].display_value(),
+            "Soft",
+            "clamps at the start"
+        );
     }
 
     #[test]

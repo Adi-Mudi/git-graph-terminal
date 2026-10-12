@@ -284,7 +284,10 @@ mod tests {
             Some(Action::CdvToggleView),
             "#cdvFileViewTypeTree / #cdvFileViewTypeList"
         );
-        assert_eq!(action_for(key(KeyCode::Char('+'))), Some(Action::CdvResizeUp));
+        assert_eq!(
+            action_for(key(KeyCode::Char('+'))),
+            Some(Action::CdvResizeUp)
+        );
         assert_eq!(
             action_for(key(KeyCode::Char('-'))),
             Some(Action::CdvResizeDown)

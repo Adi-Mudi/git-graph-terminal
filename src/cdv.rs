@@ -50,9 +50,7 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
 use crate::data::Commit;
-use crate::files::{
-    self, FileRow, FileRowKind, FileTree, FileView, GitFileChange, GitFileStatus,
-};
+use crate::files::{self, FileRow, FileRowKind, FileTree, FileView, GitFileChange, GitFileStatus};
 use crate::layout::types::RowIdx;
 use crate::render::columns::long_date;
 
@@ -196,12 +194,7 @@ impl CdvState {
     }
 
     /// A loaded comparison panel (VIS-040).
-    pub fn comparison(
-        row: RowIdx,
-        from: &str,
-        to: &str,
-        changes: Vec<GitFileChange>,
-    ) -> Self {
+    pub fn comparison(row: RowIdx, from: &str, to: &str, changes: Vec<GitFileChange>) -> Self {
         let tree = FileTree::build(&changes);
         CdvState {
             kind: CdvKind::Comparison,
@@ -283,7 +276,8 @@ impl CdvState {
     /// `files::flatten_tree`), which is exactly what [`CdvState::closed_folders`]
     /// stores.
     pub fn file_rows(&self) -> Vec<FileRow> {
-        let closed: std::collections::HashSet<String> = self.closed_folders.iter().cloned().collect();
+        let closed: std::collections::HashSet<String> =
+            self.closed_folders.iter().cloned().collect();
         files::file_rows(&self.tree, &self.changes, self.view, &closed)
     }
 
@@ -315,7 +309,10 @@ impl CdvState {
                 ])]
             }
             CdvKind::Comparison => {
-                let to = self.compare_with.as_deref().unwrap_or("Uncommitted Changes");
+                let to = self
+                    .compare_with
+                    .as_deref()
+                    .unwrap_or("Uncommitted Changes");
                 let to = if to == crate::data::UNCOMMITTED {
                     "Uncommitted Changes"
                 } else {
@@ -458,7 +455,10 @@ impl CdvState {
                     ));
                 }
                 if self.last_viewed_file.as_deref() == Some(row.path.as_str()) {
-                    spans.push(Span::styled("  (Last Viewed)", Style::default().fg(Color::Cyan)));
+                    spans.push(Span::styled(
+                        "  (Last Viewed)",
+                        Style::default().fg(Color::Cyan),
+                    ));
                 }
                 if change.submodule {
                     spans.push(Span::styled(
@@ -550,7 +550,11 @@ fn email_suffix(email: &str) -> String {
 
 /// The signature glyph + description (`generateSignatureHtml`).
 fn signature_badge(detail: &files::CommitDetail) -> String {
-    format!("{} {}", detail.signature_status, detail.signature_description())
+    format!(
+        "{} {}",
+        detail.signature_status,
+        detail.signature_description()
+    )
 }
 
 fn signature_style(status: char) -> Style {
@@ -624,7 +628,12 @@ mod tests {
     use super::*;
     use crate::data::UNCOMMITTED;
 
-    fn change(status: GitFileStatus, path: &str, adds: Option<u32>, dels: Option<u32>) -> GitFileChange {
+    fn change(
+        status: GitFileStatus,
+        path: &str,
+        adds: Option<u32>,
+        dels: Option<u32>,
+    ) -> GitFileChange {
         GitFileChange {
             old_path: path.to_string(),
             new_path: path.to_string(),
@@ -682,7 +691,10 @@ mod tests {
         let text = text_of(&state.summary_lines());
         assert!(text.contains("Commit: abcdef1234567890"), "{text}");
         assert!(text.contains("Parents: 1111111, 2222222"), "{text}");
-        assert!(text.contains("Author: Ada Lovelace <ada@example.invalid>"), "{text}");
+        assert!(
+            text.contains("Author: Ada Lovelace <ada@example.invalid>"),
+            "{text}"
+        );
         assert!(
             text.contains("Committer: Grace Hopper <grace@example.invalid>"),
             "{text}"
@@ -702,7 +714,10 @@ mod tests {
         let state = CdvState::commit(0, detail, vec![]);
         let text = text_of(&state.summary_lines());
         assert!(text.contains("Author Date: 2020-09-13 12:26:40Z"), "{text}");
-        assert!(text.contains("Committer Date: 2023-11-14 22:13:20Z"), "{text}");
+        assert!(
+            text.contains("Committer Date: 2023-11-14 22:13:20Z"),
+            "{text}"
+        );
     }
 
     #[test]
@@ -763,7 +778,12 @@ mod tests {
 
     #[test]
     fn vis_041_and_042_the_view_toggles_and_is_named() {
-        let changes = vec![change(GitFileStatus::Modified, "src/main.rs", Some(3), Some(1))];
+        let changes = vec![change(
+            GitFileStatus::Modified,
+            "src/main.rs",
+            Some(3),
+            Some(1),
+        )];
         let mut state = CdvState::commit(0, detail(), changes);
         assert_eq!(state.view, FileView::Tree);
         assert!(text_of(&state.lines()).contains("Tree View"));
@@ -790,7 +810,8 @@ mod tests {
             "the tree has a folder row: {tree:?}"
         );
         assert!(
-            tree.iter().any(|row| row.depth == 1 && row.label == "main.rs"),
+            tree.iter()
+                .any(|row| row.depth == 1 && row.label == "main.rs"),
             "the file is nested: {tree:?}"
         );
 
@@ -805,7 +826,12 @@ mod tests {
 
     #[test]
     fn vis_041_a_collapsed_folder_hides_its_files() {
-        let changes = vec![change(GitFileStatus::Modified, "src/main.rs", Some(1), Some(1))];
+        let changes = vec![change(
+            GitFileStatus::Modified,
+            "src/main.rs",
+            Some(1),
+            Some(1),
+        )];
         let mut state = CdvState::commit(0, detail(), changes);
         assert!(state.file_rows().iter().any(|row| row.label == "main.rs"));
 
@@ -822,7 +848,12 @@ mod tests {
 
     #[test]
     fn vis_047_a_modified_text_file_shows_its_counts() {
-        let changes = vec![change(GitFileStatus::Modified, "src/main.rs", Some(3), Some(1))];
+        let changes = vec![change(
+            GitFileStatus::Modified,
+            "src/main.rs",
+            Some(3),
+            Some(1),
+        )];
         let state = CdvState::commit(0, detail(), changes);
         let text = text_of(&state.lines());
         assert!(text.contains("[M]"), "{text}");
@@ -887,7 +918,12 @@ mod tests {
 
     #[test]
     fn a_reviewed_file_is_marked() {
-        let changes = vec![change(GitFileStatus::Modified, "src/main.rs", Some(1), Some(1))];
+        let changes = vec![change(
+            GitFileStatus::Modified,
+            "src/main.rs",
+            Some(1),
+            Some(1),
+        )];
         let mut state = CdvState::commit(0, detail(), changes);
         assert!(!text_of(&state.lines()).contains("Reviewed"));
         state.toggle_reviewed("src/main.rs");
@@ -899,7 +935,12 @@ mod tests {
 
     #[test]
     fn the_last_viewed_file_is_marked() {
-        let changes = vec![change(GitFileStatus::Modified, "src/main.rs", Some(1), Some(1))];
+        let changes = vec![change(
+            GitFileStatus::Modified,
+            "src/main.rs",
+            Some(1),
+            Some(1),
+        )];
         let mut state = CdvState::commit(0, detail(), changes);
         state.last_viewed_file = Some("src/main.rs".to_string());
         assert!(text_of(&state.lines()).contains("(Last Viewed)"));
@@ -919,7 +960,10 @@ mod tests {
         state.failed("bad object");
         assert!(!state.loading);
         let text = text_of(&state.lines());
-        assert!(text.contains("Unable to load commit details: bad object"), "{text}");
+        assert!(
+            text.contains("Unable to load commit details: bad object"),
+            "{text}"
+        );
         assert!(state.status_line().contains("error"));
     }
 

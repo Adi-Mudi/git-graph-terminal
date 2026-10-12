@@ -462,8 +462,14 @@ pub fn plan(action: RefAction, target: &ActionTarget) -> ActionPlan {
     // W6/T2: `CreateBranch`'s dialog asks for the new branch name in a
     // `new_name` field, so the form value has to outrank the base ref the menu
     // put in `name`/`ref_name`/`branch`.
-    let branch_name =
-        || ActionTarget::first(&[&target.new_name, &target.name, &target.ref_name, &target.branch]);
+    let branch_name = || {
+        ActionTarget::first(&[
+            &target.new_name,
+            &target.name,
+            &target.ref_name,
+            &target.branch,
+        ])
+    };
 
     match action {
         AddRemote => {
