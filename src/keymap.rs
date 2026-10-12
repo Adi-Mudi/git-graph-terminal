@@ -44,7 +44,8 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use crate::app::{Action, MenuNav};
+use crate::app::{Action, MenuNav, PagerNav};
+use crate::dialog::DialogKey;
 
 /// Does this key open the context menu for the selected row?
 ///
@@ -76,6 +77,134 @@ pub fn menu_nav_for(key: KeyEvent) -> Option<MenuNav> {
         }
         _ => None,
     }
+}
+
+/// Translate a key for the **open** dialog (W7/T1).
+///
+/// The reference routes these from a window-level listener
+/// (`web/main.ts:2032-2040`): `Escape` closes the dialog and `Enter` submits it
+/// from anywhere, including inside an input. `Tab`/`Shift+Tab` (and the arrow
+/// aliases) walk the generated `tabindex` order, and a plain character edits the
+/// focused text field.
+///
+/// This runs **before** the menu and the global [`action_for`] map, so the
+/// dialog provably owns the keyboard while it is open.
+pub fn dialog_key_for(key: KeyEvent) -> Option<DialogKey> {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    let alt = key.modifiers.contains(KeyModifiers::ALT);
+    if ctrl || alt {
+        return None;
+    }
+    match key.code {
+        KeyCode::Esc => Some(DialogKey::Escape),
+        KeyCode::Enter => Some(DialogKey::Submit),
+        KeyCode::Tab | KeyCode::Down => Some(DialogKey::Next),
+        KeyCode::BackTab | KeyCode::Up => Some(DialogKey::Prev),
+        KeyCode::Backspace => Some(DialogKey::Backspace),
+        KeyCode::Delete => Some(DialogKey::Delete),
+        KeyCode::Left => Some(DialogKey::Left),
+        KeyCode::Right => Some(DialogKey::Right),
+        KeyCode::Home => Some(DialogKey::Home),
+        KeyCode::End => Some(DialogKey::End),
+        KeyCode::Char(' ') => Some(DialogKey::Space),
+        KeyCode::Char(c) => Some(DialogKey::Char(c)),
+        _ => None,
+    }
+}
+
+/// Translate a key for the **open** pager (W7/T3).
+///
+/// The pager is read-only, so the map is small: `Esc`/`q` close it, `j`/`k` and
+/// the arrows scroll by one line, `PageUp`/`PageDown` by a screenful, and
+/// `Home`/`End` jump to the ends. This runs before [`action_for`], so `q` closes
+/// the pager instead of quitting the app.
+pub fn pager_nav_for(key: KeyEvent) -> Option<PagerNav> {
+    if key.modifiers.contains(KeyModifiers::ALT) || key.modifiers.contains(KeyModifiers::CONTROL) {
+        return None;
+    }
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('Q') => Some(PagerNav::Close),
+        KeyCode::Up | KeyCode::Char('k') => Some(PagerNav::LineUp),
+        KeyCode::Down | KeyCode::Char('j') => Some(PagerNav::LineDown),
+        KeyCode::PageUp => Some(PagerNav::PageUp),
+        KeyCode::PageDown => Some(PagerNav::PageDown),
+        KeyCode::Home => Some(PagerNav::Top),
+        KeyCode::End => Some(PagerNav::Bottom),
+        _ => None,
+    }
+}
+
+/// Translate a key for the **open** find widget (W7/T2).
+///
+/// While the widget owns the keyboard, a plain character is query text
+/// (`push_char`), `Backspace` edits it, `Enter`/`Shift+Enter` step through the
+/// matches, and `Esc` closes the widget and restores the pre-find selection.
+/// The W6 chords (`Ctrl+F`, `F3`, `Alt+C`…) still fall through to
+/// [`action_for`] so the existing toggles keep working while the bar is up.
+pub fn find_key_for(key: KeyEvent) -> Option<FindKey> {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    let alt = key.modifiers.contains(KeyModifiers::ALT);
+    let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+    if ctrl || alt {
+        return None;
+    }
+    match key.code {
+        KeyCode::Esc => Some(FindKey::Close),
+        KeyCode::Backspace => Some(FindKey::Backspace),
+        KeyCode::Enter if shift => Some(FindKey::Prev),
+        KeyCode::Enter => Some(FindKey::Next),
+        KeyCode::Char(c) if !shift => Some(FindKey::Char(c)),
+        _ => None,
+    }
+}
+
+/// Translate a key for the **focused** CDV file list (W7/T3).
+///
+/// The reference reaches the file-row menu and the reviewed checkbox through
+/// **click targets** (`#cdvFileViewTypeTree`, the row context menu, and the
+/// `Reviewed` cell at `web/main.ts:2620`), not keys. A terminal needs keys, so
+/// this map is the terminal equivalent of those controls. It runs only while
+/// `Tab` has given the CDV the keyboard, so the commit table's `j`/`k`/`Enter`
+/// stay theirs.
+///
+/// | key | action | reference control |
+/// | --- | ------ | ----------------- |
+/// | `j` / `Down` | next file row | — |
+/// | `k` / `Up` | previous file row | — |
+/// | `Enter` | A65 View Diff | file-row menu |
+/// | `o` | A66 View File at Revision | file-row menu |
+/// | `Space` | A68 Mark Reviewed (VIS-049) | the row's `Reviewed` cell |
+/// | `Left` | collapse folder | `alterFileTreeFolderOpen` |
+/// | `Right` | expand folder | `alterFileTreeFolderOpen` |
+pub fn cdv_key_for(key: KeyEvent) -> Option<Action> {
+    if key.modifiers.contains(KeyModifiers::CONTROL) || key.modifiers.contains(KeyModifiers::ALT) {
+        return None;
+    }
+    match key.code {
+        KeyCode::Down | KeyCode::Char('j') => Some(Action::CdvFileNext),
+        KeyCode::Up | KeyCode::Char('k') => Some(Action::CdvFilePrev),
+        KeyCode::Enter => Some(Action::CdvFileViewDiff),
+        KeyCode::Char('o') | KeyCode::Char('O') => Some(Action::CdvFileViewRevision),
+        KeyCode::Char(' ') => Some(Action::CdvFileToggleReviewed),
+        KeyCode::Left => Some(Action::CdvFolderCollapse),
+        KeyCode::Right => Some(Action::CdvFolderExpand),
+        _ => None,
+    }
+}
+
+/// A keypress translated for the open find widget (W7/T2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FindKey {
+    /// Append `c` to the query.
+    Char(char),
+    /// Delete the last query character.
+    Backspace,
+    /// Jump to the next match.
+    Next,
+    /// Jump to the previous match.
+    Prev,
+    /// Close the widget and restore the pre-find selection.
+    Close,
 }
 
 /// Map one key event to an [`Action`], or `None` when the key is unbound.
@@ -117,6 +246,12 @@ pub fn action_for(key: KeyEvent) -> Option<Action> {
         KeyCode::Char('v') if !ctrl => Some(Action::CdvToggleView),
         KeyCode::Char('+') | KeyCode::Char('=') => Some(Action::CdvResizeUp),
         KeyCode::Char('-') | KeyCode::Char('_') => Some(Action::CdvResizeDown),
+
+        // W7/T4 — the uncommitted and comparison CDV kinds. The reference opens
+        // both from the table (the virtual uncommitted row, and `compareWithHash`
+        // set from the commit menu), so a terminal needs keys for them.
+        KeyCode::Char('u') if !ctrl => Some(Action::CdvOpenUncommitted),
+        KeyCode::Char('c') => Some(Action::CompareMark),
 
         // Branch nav: Right = first parent, Left = first child; Ctrl+Down/Up are aliases.
         KeyCode::Right => Some(Action::NextBranch),
@@ -309,6 +444,137 @@ mod tests {
             modified(KeyCode::Char('f'), KeyModifiers::ALT),
         ] {
             assert_eq!(action_for(event), None);
+        }
+    }
+
+    /// The key map that must claim a representative key (W7/T1 harness).
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Route {
+        Global,
+        Cdv,
+        Find,
+        Dialog,
+    }
+
+    /// The key that must produce `action`, and the map that must claim it.
+    ///
+    /// This is the W7/T1 regression harness: every [`Action`] variant needs a
+    /// row here, so an action that is never wired to a key fails a test instead
+    /// of only showing up when a pty session presses the key.
+    fn representative(action: Action) -> (Route, KeyEvent) {
+        use Action::*;
+        match action {
+            // The find widget owns these while it is open (W7/T2).
+            FindClose => (Route::Find, key(KeyCode::Esc)),
+            FindNext => (Route::Find, key(KeyCode::Enter)),
+            FindPrev => (Route::Find, modified(KeyCode::Enter, KeyModifiers::SHIFT)),
+            // The dialog owns these while it is open (W7/T1).
+            DialogConfirm => (Route::Dialog, key(KeyCode::Enter)),
+            DialogCancel => (Route::Dialog, key(KeyCode::Esc)),
+            // The focused CDV file list owns these (W7/T3).
+            CdvFileNext => (Route::Cdv, key(KeyCode::Char('j'))),
+            CdvFilePrev => (Route::Cdv, key(KeyCode::Char('k'))),
+            CdvFileViewDiff => (Route::Cdv, key(KeyCode::Enter)),
+            CdvFileViewRevision => (Route::Cdv, key(KeyCode::Char('o'))),
+            CdvFileToggleReviewed => (Route::Cdv, key(KeyCode::Char(' '))),
+            CdvFolderCollapse => (Route::Cdv, key(KeyCode::Left)),
+            CdvFolderExpand => (Route::Cdv, key(KeyCode::Right)),
+            // Everything else comes from the global map.
+            SelectNext => (Route::Global, key(KeyCode::Char('j'))),
+            SelectPrev => (Route::Global, key(KeyCode::Char('k'))),
+            PageNext => (Route::Global, key(KeyCode::PageDown)),
+            PagePrev => (Route::Global, key(KeyCode::PageUp)),
+            Top => (Route::Global, key(KeyCode::Home)),
+            Bottom => (Route::Global, key(KeyCode::End)),
+            ToggleExpand => (Route::Global, key(KeyCode::Enter)),
+            NextBranch => (Route::Global, key(KeyCode::Right)),
+            PrevBranch => (Route::Global, key(KeyCode::Left)),
+            StashNext => (Route::Global, key(KeyCode::Char('s'))),
+            StashPrev => (Route::Global, key(KeyCode::Char('S'))),
+            Refresh => (Route::Global, key(KeyCode::Char('r'))),
+            Quit => (Route::Global, key(KeyCode::Char('q'))),
+            CdvOpen => (Route::Global, key(KeyCode::Char('d'))),
+            CdvClose => (
+                Route::Global,
+                modified(KeyCode::Char('w'), KeyModifiers::CONTROL),
+            ),
+            CdvFocusToggle => (Route::Global, key(KeyCode::Tab)),
+            CdvToggleView => (Route::Global, key(KeyCode::Char('v'))),
+            CdvResizeUp => (Route::Global, key(KeyCode::Char('+'))),
+            CdvResizeDown => (Route::Global, key(KeyCode::Char('-'))),
+            FindOpen => (
+                Route::Global,
+                modified(KeyCode::Char('f'), KeyModifiers::CONTROL),
+            ),
+            FindToggleCase => (
+                Route::Global,
+                modified(KeyCode::Char('c'), KeyModifiers::ALT),
+            ),
+            FindToggleRegex => (
+                Route::Global,
+                modified(KeyCode::Char('r'), KeyModifiers::ALT),
+            ),
+            FindToggleCdv => (
+                Route::Global,
+                modified(KeyCode::Char('d'), KeyModifiers::ALT),
+            ),
+            CdvOpenUncommitted => (Route::Global, key(KeyCode::Char('u'))),
+            CompareMark => (Route::Global, key(KeyCode::Char('c'))),
+        }
+    }
+
+    /// Did `route` claim `key` for exactly `action`?
+    fn claimed(route: Route, key: KeyEvent, action: Action) -> bool {
+        match route {
+            Route::Global => action_for(key) == Some(action),
+            Route::Cdv => cdv_key_for(key) == Some(action),
+            Route::Find => {
+                let expected = match action {
+                    Action::FindClose => FindKey::Close,
+                    Action::FindNext => FindKey::Next,
+                    Action::FindPrev => FindKey::Prev,
+                    _ => return false,
+                };
+                find_key_for(key) == Some(expected)
+            }
+            Route::Dialog => {
+                let expected = if action == Action::DialogCancel {
+                    DialogKey::Escape
+                } else {
+                    DialogKey::Submit
+                };
+                dialog_key_for(key) == Some(expected)
+            }
+        }
+    }
+
+    /// W7/T1 harness: every [`Action`] must be reachable from a key.
+    #[test]
+    fn every_action_is_reachable_from_a_key() {
+        for &action in Action::ALL {
+            let (route, event) = representative(action);
+            assert!(
+                claimed(route, event, action),
+                "{action:?} is unreachable: {event:?} on the {route:?} map did not produce it"
+            );
+        }
+    }
+
+    /// The pager's own map has the same guarantee (W7/T3).
+    #[test]
+    fn every_pager_nav_is_reachable_from_a_key() {
+        let table = [
+            (key(KeyCode::Char('j')), PagerNav::LineDown),
+            (key(KeyCode::Char('k')), PagerNav::LineUp),
+            (key(KeyCode::PageDown), PagerNav::PageDown),
+            (key(KeyCode::PageUp), PagerNav::PageUp),
+            (key(KeyCode::Home), PagerNav::Top),
+            (key(KeyCode::End), PagerNav::Bottom),
+            (key(KeyCode::Char('q')), PagerNav::Close),
+            (key(KeyCode::Esc), PagerNav::Close),
+        ];
+        for (event, expected) in table {
+            assert_eq!(pager_nav_for(event), Some(expected));
         }
     }
 }

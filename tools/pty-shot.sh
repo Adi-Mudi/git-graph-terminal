@@ -60,6 +60,7 @@ send_keys() {
       right) printf '\033[C' ;;
       left)  printf '\033[D' ;;
       enter|cr) printf '\r' ;;
+      tab)   printf '\t' ;;
       pgup|pageup)     printf '\033[5~' ;;
       pgdn|pagedown)   printf '\033[6~' ;;
       home)  printf '\033[H' ;;

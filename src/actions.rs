@@ -876,14 +876,14 @@ pub fn plan(action: RefAction, target: &ActionTarget) -> ActionPlan {
             PlanKind::OutOfScope,
         )
         .payload(&target.url),
-        OpenFile => ActionPlan::new(
-            "DSP-038",
-            "A68",
-            "openFile",
-            "Open File",
-            PlanKind::OutOfScope,
-        )
-        .payload(&target.path),
+        OpenFile => {
+            // `openFile` (`src/utils.ts:390-405`) opens the working-tree file in the
+            // editor. A terminal pages it instead; `git show :<path>` is the closest
+            // git-only equivalent (the index/working-tree blob).
+            let spec = format!(":{}", target.path);
+            ActionPlan::new("DSP-038", "A68", "openFile", "Open File", PlanKind::Execute)
+                .owned_argv(vec!["show".to_string(), spec])
+        }
         OpenTerminal => ActionPlan::new(
             "DSP-039",
             "—",
@@ -1079,27 +1079,55 @@ pub fn plan(action: RefAction, target: &ActionTarget) -> ActionPlan {
             "Update Code Review",
             PlanKind::OutOfScope,
         ),
-        ViewDiff => ActionPlan::new(
-            "DSP-059",
-            "A65",
-            "viewDiff",
-            "View Diff",
-            PlanKind::OutOfScope,
-        ),
-        ViewDiffWithWorkingFile => ActionPlan::new(
-            "DSP-060",
-            "A67",
-            "viewDiffWithWorkingFile",
-            "View Diff with Working File",
-            PlanKind::OutOfScope,
-        ),
-        ViewFileAtRevision => ActionPlan::new(
-            "DSP-061",
-            "A66",
-            "viewFileAtRevision",
-            "View File at Revision",
-            PlanKind::OutOfScope,
-        ),
+        ViewDiff => {
+            // `viewDiff` (`src/utils.ts:418-443`): `git diff <from> <to> -- <path>`.
+            // The old side is `<from>^` when `from == to`, and `UNCOMMITTED` is the
+            // working tree, which has no ref to name.
+            let from = ActionTarget::first(&[&target.from, &target.hash, &target.commit]);
+            let to = target.to.clone();
+            let old = if from == to { format!("{from}^") } else { from };
+            let mut argv = vec!["diff".to_string(), "--no-color".to_string(), old];
+            if !to.is_empty() && to != crate::data::UNCOMMITTED {
+                argv.push(to);
+            }
+            argv.push("--".to_string());
+            argv.push(target.path.clone());
+            ActionPlan::new("DSP-059", "A65", "viewDiff", "View Diff", PlanKind::Execute)
+                .owned_argv(argv)
+        }
+        ViewDiffWithWorkingFile => {
+            // `viewDiffWithWorkingFile` (`src/utils.ts:453-477`) → `viewDiff(hash,
+            // UNCOMMITTED, …)` → `git diff <hash> -- <path>`.
+            let hash = ActionTarget::first(&[&target.from, &target.hash, &target.commit]);
+            let mut argv = vec![
+                "diff".to_string(),
+                "--no-color".to_string(),
+                hash,
+                "--".to_string(),
+            ];
+            argv.push(target.path.clone());
+            ActionPlan::new(
+                "DSP-060",
+                "A67",
+                "viewDiffWithWorkingFile",
+                "View Diff with Working File",
+                PlanKind::Execute,
+            )
+            .owned_argv(argv)
+        }
+        ViewFileAtRevision => {
+            // `viewFileAtRevision` (`src/utils.ts:484-490`) → `git show <hash>:<path>`.
+            let hash = ActionTarget::first(&[&target.hash, &target.commit]);
+            let spec = format!("{hash}:{}", target.path);
+            ActionPlan::new(
+                "DSP-061",
+                "A66",
+                "viewFileAtRevision",
+                "View File at Revision",
+                PlanKind::Execute,
+            )
+            .owned_argv(vec!["show".to_string(), spec])
+        }
         ViewScm => ActionPlan::new(
             "DSP-062",
             "A59",
@@ -1657,10 +1685,11 @@ mod tests {
 
     #[test]
     fn out_of_scope_rows_are_explicit() {
+        // A65-A68 (`viewDiff` / `viewFileAtRevision` / `viewDiffWithWorkingFile` /
+        // `openFile`) left this list in W7/T3: they now run `git diff` /
+        // `git show` instead of being stubbed.
         for action in [
-            RefAction::ViewDiff,
             RefAction::CreateArchive,
-            RefAction::OpenFile,
             RefAction::StartCodeReview,
             RefAction::ViewScm,
         ] {
@@ -1685,10 +1714,11 @@ mod tests {
             }
         }
         assert_eq!(execute + confirm + local + oos, 62);
-        assert_eq!(execute, 10, "safe executing rows");
+        // A65-A68 moved from OutOfScope to Execute in W7/T3 (10 -> 14).
+        assert_eq!(execute, 14, "safe executing rows");
         assert_eq!(confirm, 25, "gated rows");
         assert_eq!(local, 12, "local/state rows");
-        assert_eq!(oos, 15, "out-of-scope rows");
+        assert_eq!(oos, 11, "out-of-scope rows");
     }
 
     #[test]
@@ -1720,7 +1750,7 @@ mod tests {
         assert!(matches!(outcome, DispatchOutcome::NeedsConfirm(_)));
         assert!(outcome.status_line().contains("needs confirmation"));
 
-        let outcome = dispatch(bogus, RefAction::ViewDiff, &target());
+        let outcome = dispatch(bogus, RefAction::ViewScm, &target());
         assert!(matches!(outcome, DispatchOutcome::Skipped(_)));
     }
 

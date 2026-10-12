@@ -28,7 +28,7 @@
 use std::collections::HashSet;
 use std::path::Path;
 
-use crate::actions::{self, RefAction};
+use crate::actions::{self, DispatchOutcome, RefAction};
 use crate::cdv::{CdvKind, CdvState};
 use crate::data::{self, Commit};
 use crate::dialog::{self, Dialog, DialogKey, DialogResult};
@@ -112,6 +112,13 @@ pub struct AppState {
     pub find: FindWidget,
     /// The open modal dialog, if any (W6/T2). While `Some`, it owns the keyboard.
     pub dialog: Option<Dialog>,
+    /// The open read-only pager, if any (W7/T3). While `Some`, it owns the keyboard.
+    pub pager: Option<crate::pager::Pager>,
+    /// The commit row marked as the comparison base (`c`, VIS-040, W7/T4).
+    pub compare_base: Option<RowIdx>,
+    /// The row selected before the find widget opened, restored on `Esc`
+    /// (W7/T2: `findWidget.ts:139-158` `restoreState`).
+    pub selection_before_find: Option<RowIdx>,
 }
 
 /// Every keyboard-driven state change.
@@ -176,6 +183,74 @@ pub enum Action {
     DialogConfirm,
     /// Dismiss the open dialog — `Esc`.
     DialogCancel,
+    /// Open the uncommitted-changes CDV — `u` (VIS-039, W7/T4).
+    CdvOpenUncommitted,
+    /// Mark/unmark the selected commit as the comparison base — `c` (VIS-040).
+    /// Pressing `c` on the already-marked row opens the comparison CDV.
+    CompareMark,
+    /// Move the CDV file-row cursor down — `j` / Down while the CDV is focused
+    /// (W7/T3).
+    CdvFileNext,
+    /// Move the CDV file-row cursor up — `k` / Up while the CDV is focused.
+    CdvFilePrev,
+    /// Open the pager with `git diff` for the selected file row — `Enter` (A65).
+    CdvFileViewDiff,
+    /// Open the pager with `git show <hash>:<path>` — `o` (A66).
+    CdvFileViewRevision,
+    /// Mark/unmark the selected file row reviewed — `Space` (VIS-049).
+    CdvFileToggleReviewed,
+    /// Collapse the folder under the cursor — `Left`.
+    CdvFolderCollapse,
+    /// Expand the folder under the cursor — `Right`.
+    CdvFolderExpand,
+}
+
+impl Action {
+    /// Every variant, for the W7 regression harness.
+    ///
+    /// The harness asserts each one is reachable from a key, so adding a
+    /// variant without a binding fails a test instead of a pty capture. The
+    /// list is test-only API: the shipped binary never enumerates actions.
+    #[cfg(test)]
+    pub const ALL: &'static [Action] = &[
+        Action::SelectNext,
+        Action::SelectPrev,
+        Action::PageNext,
+        Action::PagePrev,
+        Action::Top,
+        Action::Bottom,
+        Action::ToggleExpand,
+        Action::NextBranch,
+        Action::PrevBranch,
+        Action::StashNext,
+        Action::StashPrev,
+        Action::Refresh,
+        Action::Quit,
+        Action::CdvOpen,
+        Action::CdvClose,
+        Action::CdvFocusToggle,
+        Action::CdvToggleView,
+        Action::CdvResizeUp,
+        Action::CdvResizeDown,
+        Action::FindOpen,
+        Action::FindClose,
+        Action::FindNext,
+        Action::FindPrev,
+        Action::FindToggleCase,
+        Action::FindToggleRegex,
+        Action::FindToggleCdv,
+        Action::DialogConfirm,
+        Action::DialogCancel,
+        Action::CdvOpenUncommitted,
+        Action::CompareMark,
+        Action::CdvFileNext,
+        Action::CdvFilePrev,
+        Action::CdvFileViewDiff,
+        Action::CdvFileViewRevision,
+        Action::CdvFileToggleReviewed,
+        Action::CdvFolderCollapse,
+        Action::CdvFolderExpand,
+    ];
 }
 
 /// What [`reduce`] wants the caller to do next.
@@ -264,6 +339,18 @@ pub enum MenuNav {
     Close,
     /// Single-key shortcut inside the menu (`a`..`z`).
     Shortcut(char),
+}
+
+/// A keypress translated for the open pager (W7/T3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PagerNav {
+    LineUp,
+    LineDown,
+    PageUp,
+    PageDown,
+    Top,
+    Bottom,
+    Close,
 }
 
 /// What [`AppState::menu_nav`] did, so the caller can dispatch on activation.
@@ -398,6 +485,9 @@ impl AppState {
             cdv_focused: false,
             find: FindWidget::new(),
             dialog: None,
+            pager: None,
+            compare_base: None,
+            selection_before_find: None,
         }
     }
 
@@ -462,6 +552,16 @@ impl AppState {
     /// Is a context menu open?
     pub fn menu_is_open(&self) -> bool {
         self.menu.is_some()
+    }
+
+    /// Is a modal dialog open? While `Some`, the dialog owns the keyboard (W7/T1).
+    pub fn dialog_is_open(&self) -> bool {
+        self.dialog.is_some()
+    }
+
+    /// Is the read-only pager open? While `Some`, it owns the keyboard (W7/T3).
+    pub fn pager_is_open(&self) -> bool {
+        self.pager.is_some()
     }
 
     /// Does any loaded row carry a remote-tracking decoration?
@@ -788,10 +888,13 @@ pub fn reduce(state: &mut AppState, action: Action, repo: &Path) -> Outcome {
 
         // W6/T1 — the find widget.
         Action::FindOpen => {
+            if !state.find.visible {
+                state.selection_before_find = Some(state.selected);
+            }
             state.find.show();
             recompute_find(state);
         }
-        Action::FindClose => state.find.close(),
+        Action::FindClose => close_find(state),
         Action::FindNext => find_step(state, true),
         Action::FindPrev => find_step(state, false),
         Action::FindToggleCase => {
@@ -811,6 +914,19 @@ pub fn reduce(state: &mut AppState, action: Action, repo: &Path) -> Outcome {
         // [`AppState::dialog_key`]; these two actions are the terminal states.
         Action::DialogConfirm => confirm_dialog(state, repo),
         Action::DialogCancel => state.dialog = None,
+
+        // W7/T3 — the CDV file-row cursor and the A65–A68 file actions.
+        Action::CdvFileNext => cdv_move_file(state, 1),
+        Action::CdvFilePrev => cdv_move_file(state, -1),
+        Action::CdvFileViewDiff => cdv_open_pager(state, repo, RefAction::ViewDiff),
+        Action::CdvFileViewRevision => cdv_open_pager(state, repo, RefAction::ViewFileAtRevision),
+        Action::CdvFileToggleReviewed => cdv_toggle_reviewed(state),
+        Action::CdvFolderCollapse => cdv_set_folder(state, false),
+        Action::CdvFolderExpand => cdv_set_folder(state, true),
+
+        // W7/T4 — the uncommitted and comparison CDV kinds.
+        Action::CdvOpenUncommitted => open_uncommitted_cdv(state, repo),
+        Action::CompareMark => compare_mark(state, repo),
     }
     state.sync_status();
     state.ensure_visible();
@@ -872,7 +988,88 @@ pub fn open_cdv(state: &mut AppState, repo: &Path) {
         },
         Err(error) => cdv.failed(&error.to_string()),
     }
+    cdv.external_diff = files::external_diff_tool(repo);
     state.cdv = Some(cdv);
+}
+
+/* ------------------------------------------------------------------ */
+/* W7/T4 — the uncommitted and comparison CDV kinds                    */
+/* ------------------------------------------------------------------ */
+
+/// `u` — open the uncommitted-changes CDV (VIS-039).
+///
+/// The reference inserts a virtual uncommitted row at the top of the table only
+/// when the working tree has changes (`src/dataSource.ts:189-192`). `data.rs`
+/// does not model that row, so the panel is anchored at row `0` — the position
+/// the virtual row would take — and an empty working tree leaves the panel
+/// closed and says so, which is the same precondition the reference row has.
+pub fn open_uncommitted_cdv(state: &mut AppState, repo: &Path) {
+    let changes = match files::working_tree_changes(repo) {
+        Ok(changes) => changes,
+        Err(error) => {
+            state.status.last_action = Some(format!("uncommitted changes: {error}"));
+            return;
+        }
+    };
+    if changes.is_empty() {
+        state.status.last_action = Some("No uncommitted changes.".to_string());
+        state.dialog = Some(Dialog::message(
+            "Uncommitted Changes",
+            vec!["There are no uncommitted changes to display.".to_string()],
+        ));
+        return;
+    }
+    let mut cdv = CdvState::uncommitted(0, Vec::new());
+    cdv.loaded_changes(changes);
+    cdv.external_diff = files::external_diff_tool(repo);
+    state.cdv = Some(cdv);
+    state.cdv_focused = true;
+}
+
+/// `c` — mark the selected commit as the comparison base, or open the
+/// comparison when the base is already marked (VIS-040).
+///
+/// The reference sets `compareWithHash` from the commit menu and opens the
+/// comparison on the second commit; the terminal port keeps the base in
+/// [`AppState::compare_base`] so the same two-step gesture works from the
+/// keyboard. Pressing `c` twice on the same row clears the mark.
+pub fn compare_mark(state: &mut AppState, repo: &Path) {
+    let row = state.selected;
+    if state.compare_base == Some(row) {
+        state.compare_base = None;
+        state.status.last_action = Some("comparison cleared".to_string());
+        return;
+    }
+    match state.compare_base.take() {
+        None => {
+            state.compare_base = Some(row);
+            state.status.last_action = Some(format!("marked row {} for comparison", row + 1));
+        }
+        Some(base) => open_comparison_cdv(state, repo, base, row),
+    }
+}
+
+/// Load the comparison CDV for two rows.
+///
+/// `getCommitOrder` (`web/main.ts:2843-2849`) makes the **older** commit the
+/// diff's `from` side; in table order the older commit is the larger row index.
+fn open_comparison_cdv(state: &mut AppState, repo: &Path, a: RowIdx, b: RowIdx) {
+    let (Some(left), Some(right)) = (
+        state.rows.get(a as usize).map(|c| c.hash.clone()),
+        state.rows.get(b as usize).map(|c| c.hash.clone()),
+    ) else {
+        return;
+    };
+    let (from, to) = if a > b { (left, right) } else { (right, left) };
+    let mut cdv = CdvState::comparison(state.selected, &from, &to, Vec::new());
+    match files::comparison_changes(repo, &from, &to) {
+        Ok(changes) => cdv.loaded_changes(changes),
+        Err(error) => cdv.failed(&error.to_string()),
+    }
+    cdv.external_diff = files::external_diff_tool(repo);
+    state.cdv = Some(cdv);
+    state.cdv_focused = true;
+    state.status.last_action = Some(format!("comparing {from} to {to}"));
 }
 
 /// Close the panel when it belongs to `row` (collapsing that row).
@@ -887,6 +1084,90 @@ fn close_cdv_for(state: &mut AppState, row: RowIdx) {
 fn resize_cdv(state: &mut AppState, delta: i32) {
     if let Some(cdv) = state.cdv.as_mut() {
         cdv.resize(delta);
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/* W7/T3 — the CDV file-row cursor and the A65–A68 file actions        */
+/* ------------------------------------------------------------------ */
+
+/// The text rows the docked panel can show, for the cursor's scroll window.
+fn cdv_file_viewport(state: &AppState) -> u16 {
+    state
+        .cdv
+        .as_ref()
+        .map(|cdv| cdv.height.saturating_sub(2))
+        .unwrap_or(0)
+}
+
+/// Move the CDV file-row cursor by `delta` (W7/T3).
+fn cdv_move_file(state: &mut AppState, delta: i32) {
+    let viewport = cdv_file_viewport(state);
+    if let Some(cdv) = state.cdv.as_mut() {
+        cdv.move_selection(delta);
+        cdv.ensure_file_visible(viewport);
+    }
+}
+
+/// Collapse (`open = false`) or expand (`open = true`) the folder under the
+/// cursor (W7/T3).
+fn cdv_set_folder(state: &mut AppState, open: bool) {
+    let viewport = cdv_file_viewport(state);
+    if let Some(cdv) = state.cdv.as_mut() {
+        cdv.set_folder_open_at_cursor(open);
+        cdv.ensure_file_visible(viewport);
+    }
+}
+
+/// Toggle the reviewed flag on the row under the cursor (VIS-049, W7/T3).
+fn cdv_toggle_reviewed(state: &mut AppState) {
+    if let Some(cdv) = state.cdv.as_mut() {
+        if let Some(path) = cdv.selected_path() {
+            cdv.toggle_reviewed(&path);
+        }
+    }
+}
+
+/// Build the [`actions::ActionTarget`] for the CDV row under the cursor.
+///
+/// `from` is the panel's commit (or the comparison's left side) and `to` is the
+/// comparison's right side, or `UNCOMMITTED` for a plain commit / working tree —
+/// exactly the pair `getCommitHashForFile` feeds to `viewDiff`
+/// (`web/main.ts:2880-2885`).
+fn cdv_file_target(state: &AppState) -> Option<actions::ActionTarget> {
+    let cdv = state.cdv.as_ref()?;
+    let change = cdv.selected_change()?;
+    let from = cdv.hash.clone();
+    let to = cdv
+        .compare_with
+        .clone()
+        .unwrap_or_else(|| crate::data::UNCOMMITTED.to_string());
+    Some(actions::ActionTarget {
+        path: change.new_path.clone(),
+        hash: from.clone(),
+        commit: from.clone(),
+        from,
+        to,
+        ..actions::ActionTarget::default()
+    })
+}
+
+/// Run `action`'s plan for the CDV row under the cursor and page the output.
+///
+/// A terminal has no editor, so the R3 tie-break puts the action + data here and
+/// leaves the editor chrome out: the pager shows exactly what git printed, with
+/// the argv git ran as its title.
+fn cdv_open_pager(state: &mut AppState, repo: &Path, action: RefAction) {
+    let Some(target) = cdv_file_target(state) else {
+        return;
+    };
+    let plan = actions::plan(action, &target);
+    let title = format!("git {}", plan.argv.join(" "));
+    match actions::dispatch(repo, action, &target) {
+        DispatchOutcome::Executed { stdout, .. } => {
+            state.pager = Some(crate::pager::Pager::new(title, &stdout));
+        }
+        other => state.status.last_action = Some(other.status_line()),
     }
 }
 
@@ -932,6 +1213,78 @@ fn follow_find_cdv(state: &mut AppState, repo: &Path) {
         state.selected = row as RowIdx;
         open_cdv(state, repo);
     }
+}
+
+/// Close the widget and put the selection back where it was before `Ctrl+F`
+/// (`findWidget.ts:139-158` `restoreState`; W7/T2 acceptance).
+fn close_find(state: &mut AppState) {
+    state.find.close();
+    if let Some(row) = state.selection_before_find.take() {
+        if (row as usize) < state.rows.len() {
+            state.selected = row;
+        }
+    }
+}
+
+/// Route one keypress to the open find widget (W7/T2).
+///
+/// Returns `true` when the widget consumed the key. This is the runtime half of
+/// [`FindWidget::push_char`] — W6 shipped the model, W7 gives it the keyboard.
+///
+/// `Escape` goes through [`reduce`] so the action layer stays the single place
+/// that closes the widget; the other keys edit the query, which is not an
+/// [`Action`].
+///
+/// Reference: `web/findWidget.ts:300-320` (the `keydown` listener) for the
+/// `Enter`/`Shift+Enter` step keys and `Escape` close.
+pub fn find_key(state: &mut AppState, key: crate::keymap::FindKey, repo: &Path) -> bool {
+    use crate::keymap::FindKey;
+    if !state.find.visible {
+        return false;
+    }
+    match key {
+        FindKey::Char(c) => {
+            state.find.push_char(c);
+            recompute_find(state);
+        }
+        FindKey::Backspace => {
+            state.find.pop_char();
+            recompute_find(state);
+        }
+        FindKey::Next => find_step(state, true),
+        FindKey::Prev => find_step(state, false),
+        FindKey::Close => {
+            reduce(state, Action::FindClose, repo);
+        }
+    }
+    state.sync_status();
+    state.ensure_visible();
+    true
+}
+
+/// Route one keypress to the open pager (W7/T3).
+///
+/// Returns `true` when the pager consumed the key. `viewport` is the number of
+/// text rows the overlay draws, so paging and the scroll clamp match the screen.
+pub fn pager_nav(state: &mut AppState, nav: PagerNav, viewport: u16) -> bool {
+    if nav == PagerNav::Close {
+        let was_open = state.pager.is_some();
+        state.pager = None;
+        return was_open;
+    }
+    let Some(pager) = state.pager.as_mut() else {
+        return false;
+    };
+    match nav {
+        PagerNav::LineUp => pager.scroll_by(-1, viewport),
+        PagerNav::LineDown => pager.scroll_by(1, viewport),
+        PagerNav::PageUp => pager.page_by(-1, viewport),
+        PagerNav::PageDown => pager.page_by(1, viewport),
+        PagerNav::Top => pager.top(),
+        PagerNav::Bottom => pager.bottom(viewport),
+        PagerNav::Close => unreachable!("handled above"),
+    }
+    true
 }
 
 /* ------------------------------------------------------------------ */

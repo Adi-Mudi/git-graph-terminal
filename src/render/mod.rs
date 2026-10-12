@@ -49,6 +49,7 @@ use crate::dialog::Dialog;
 use crate::find::FindWidget;
 use crate::layout::types::{GraphLayout, RowIdx};
 use crate::menu::ContextMenu;
+use crate::pager;
 use crate::render::columns::{commits_table_window, text_offset};
 use crate::render::glyphs::GlyphTier;
 use crate::render::graph_widget::GraphWidget;
@@ -127,6 +128,11 @@ pub fn ui(frame: &mut Frame, state: &AppState, view: &ViewOptions<'_>) {
     if let Some(menu) = &state.menu {
         context_menu(frame, menu, frame.area());
     }
+    // The pager is the top-most layer: it covers the whole window, including the
+    // status bar, and the event loop routes every key to it while it is open.
+    if let Some(pager) = &state.pager {
+        pager::draw(frame, frame.area(), pager);
+    }
 }
 
 /// Rows the W6 overlays take out of the commit body.
@@ -181,7 +187,7 @@ pub fn find_bar(frame: &mut Frame, area: Rect, find: &FindWidget) {
     } else {
         Style::default().fg(Color::Cyan)
     };
-    let title = format!(" find [{}] ", find.counter());
+    let title = format!(" {} ", find.status_line());
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(border)

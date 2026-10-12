@@ -113,6 +113,12 @@ pub struct CdvState {
     pub reviewed: Vec<String>,
     /// `expandedCommit.lastViewedFile`.
     pub last_viewed_file: Option<String>,
+    /// The configured external diff tool (`git config diff.tool` /
+    /// `gui.difftool`), or `None` when neither is set (VIS-051, W7/T4).
+    pub external_diff: Option<String>,
+    /// Cursor row into [`CdvState::file_rows`] (W7/T3) — the file-row menu's
+    /// selected row, so A65–A68 can act on it.
+    pub selected: usize,
     /// Scroll offset into the rendered lines.
     pub scroll: u16,
     /// Panel height in terminal rows.
@@ -139,29 +145,8 @@ impl CdvState {
             closed_folders: Vec::new(),
             reviewed: Vec::new(),
             last_viewed_file: None,
-            scroll: 0,
-            height: DEFAULT_HEIGHT,
-            auto_center: true,
-            error: None,
-        }
-    }
-
-    /// A loaded commit-details panel (VIS-038).
-    pub fn commit(row: RowIdx, detail: files::CommitDetail, changes: Vec<GitFileChange>) -> Self {
-        let tree = FileTree::build(&changes);
-        CdvState {
-            kind: CdvKind::Commit,
-            loading: false,
-            row,
-            hash: detail.hash.clone(),
-            compare_with: None,
-            detail: Some(detail),
-            changes,
-            tree,
-            view: FileView::Tree,
-            closed_folders: Vec::new(),
-            reviewed: Vec::new(),
-            last_viewed_file: None,
+            external_diff: None,
+            selected: 0,
             scroll: 0,
             height: DEFAULT_HEIGHT,
             auto_center: true,
@@ -185,6 +170,8 @@ impl CdvState {
             closed_folders: Vec::new(),
             reviewed: Vec::new(),
             last_viewed_file: None,
+            external_diff: None,
+            selected: 0,
             scroll: 0,
             height: DEFAULT_HEIGHT,
             auto_center: true,
@@ -208,6 +195,8 @@ impl CdvState {
             closed_folders: Vec::new(),
             reviewed: Vec::new(),
             last_viewed_file: None,
+            external_diff: None,
+            selected: 0,
             scroll: 0,
             height: DEFAULT_HEIGHT,
             auto_center: true,
@@ -227,6 +216,30 @@ impl CdvState {
     pub fn failed(&mut self, message: &str) {
         self.loading = false;
         self.error = Some(message.to_string());
+    }
+
+    /// Record the file list for a panel that has no commit summary
+    /// (`CdvKind::Uncommitted` / `CdvKind::Comparison`, W7/T4).
+    pub fn loaded_changes(&mut self, changes: Vec<GitFileChange>) {
+        self.tree = FileTree::build(&changes);
+        self.changes = changes;
+        self.loading = false;
+        self.error = None;
+        self.clamp_selection();
+    }
+
+    /// Is the external diff action available? (VIS-051)
+    ///
+    /// This is `externalDiffPossible` (`web/main.ts:2521`): a loaded panel whose
+    /// comparison or commit actually has a left-hand side to diff against.
+    pub fn external_diff_available(&self) -> bool {
+        let has_left_side = self.compare_with.is_some()
+            || self
+                .detail
+                .as_ref()
+                .map(|detail| !detail.parents.is_empty())
+                .unwrap_or(false);
+        !self.loading && has_left_side
     }
 
     /// Toggle Tree ↔ List (VIS-041 / VIS-042).
@@ -278,6 +291,75 @@ impl CdvState {
         let closed: std::collections::HashSet<String> =
             self.closed_folders.iter().cloned().collect();
         files::file_rows(&self.tree, &self.changes, self.view, &closed)
+    }
+
+    /// Number of rendered file rows.
+    pub fn file_rows_len(&self) -> usize {
+        self.file_rows().len()
+    }
+
+    /// Keep the cursor inside the row list after a collapse/expand (W7/T3).
+    pub fn clamp_selection(&mut self) {
+        let len = self.file_rows_len();
+        self.selected = if len == 0 {
+            0
+        } else {
+            self.selected.min(len - 1)
+        };
+    }
+
+    /// Move the file-row cursor by `delta`, clamped at both ends (W7/T3).
+    pub fn move_selection(&mut self, delta: i32) {
+        let len = self.file_rows_len();
+        if len == 0 {
+            self.selected = 0;
+            return;
+        }
+        self.selected = (self.selected as i32 + delta).clamp(0, len as i32 - 1) as usize;
+    }
+
+    /// The row under the cursor, if any.
+    pub fn selected_row(&self) -> Option<FileRow> {
+        self.file_rows().into_iter().nth(self.selected)
+    }
+
+    /// Full path of the row under the cursor.
+    pub fn selected_path(&self) -> Option<String> {
+        self.selected_row().map(|row| row.path)
+    }
+
+    /// The change the cursor points at, or `None` on a folder row (A65–A68).
+    pub fn selected_change(&self) -> Option<&GitFileChange> {
+        match self.selected_row()?.kind {
+            FileRowKind::File(index) => self.changes.get(index),
+            FileRowKind::Folder { .. } => None,
+        }
+    }
+
+    /// Collapse (`open = false`) or expand (`open = true`) the folder under the
+    /// cursor (W7/T3).
+    pub fn set_folder_open_at_cursor(&mut self, open: bool) {
+        if let Some(row) = self.selected_row() {
+            if matches!(row.kind, FileRowKind::Folder { .. }) && self.folder_open(&row.path) != open
+            {
+                self.toggle_folder(&row.path);
+                self.clamp_selection();
+            }
+        }
+    }
+
+    /// Scroll so the cursor row is inside `viewport` (W7/T3).
+    pub fn ensure_file_visible(&mut self, viewport: u16) {
+        if viewport == 0 {
+            return;
+        }
+        let header = self.summary_lines().len() as u16 + 2;
+        let line = header.saturating_add(self.selected as u16);
+        if line < self.scroll {
+            self.scroll = line;
+        } else if line >= self.scroll.saturating_add(viewport) {
+            self.scroll = line + 1 - viewport;
+        }
     }
 
     /// The summary lines (`web/main.ts:2539-2575`) — VIS-038/039/040.
@@ -397,39 +479,44 @@ impl CdvState {
     }
 
     /// One file-list row (VIS-047 / VIS-048 / VIS-052).
-    pub fn file_line(&self, row: &FileRow) -> Line<'static> {
+    ///
+    /// `selected` draws the W7/T3 cursor: a `›` gutter and a highlight, so the
+    /// file-row menu's target is always visible.
+    pub fn file_line(&self, row: &FileRow, selected: bool) -> Line<'static> {
         let indent = "  ".repeat(row.depth as usize);
+        let mut spans: Vec<Span<'static>> = vec![Span::styled(
+            if selected { "› " } else { "  " },
+            Style::default().fg(Color::Cyan),
+        )];
         match row.kind {
-            FileRowKind::Folder { open } => Line::from(vec![
-                Span::raw(indent),
-                Span::styled(
+            FileRowKind::Folder { open } => {
+                spans.push(Span::raw(indent));
+                spans.push(Span::styled(
                     if open { "▼ " } else { "▶ " },
                     Style::default().fg(Color::DarkGray),
-                ),
-                Span::styled(
+                ));
+                spans.push(Span::styled(
                     row.label.clone(),
                     Style::default()
                         .fg(Color::Blue)
                         .add_modifier(Modifier::BOLD),
-                ),
-            ]),
+                ));
+            }
             FileRowKind::File(index) => {
                 let Some(change) = self.changes.get(index) else {
-                    return Line::raw(row.label.clone());
+                    spans.push(Span::raw(row.label.clone()));
+                    return Line::from(spans);
                 };
-                let mut spans = vec![
-                    Span::raw(indent),
-                    Span::raw("  "),
-                    Span::styled(row.label.clone(), status_style(change.status)),
-                ];
-                // VIS-047: the status badge, then the counts for modified text files.
+                spans.push(Span::raw(indent));
+                spans.push(Span::raw("  "));
+                spans.push(Span::styled(row.label.clone(), status_style(change.status)));
+                // VIS-047: the status badge, then the counts. The reference only
+                // renders the `+N|-M` span for a changed *text* file that is not
+                // added, untracked or deleted (`web/main.ts:3591`).
                 spans.push(Span::styled(
                     format!(" [{}]", change.status.code()),
                     status_style(change.status).add_modifier(Modifier::BOLD),
                 ));
-                // VIS-047: the status badge, then the counts. The reference only
-                // renders the `+N|-M` span for a changed *text* file that is not
-                // added, untracked or deleted (`web/main.ts:3591`).
                 if !matches!(
                     change.status,
                     GitFileStatus::Added | GitFileStatus::Untracked | GitFileStatus::Deleted
@@ -474,8 +561,13 @@ impl CdvState {
                         Style::default().fg(Color::DarkGray),
                     ));
                 }
-                Line::from(spans)
             }
+        }
+        let line = Line::from(spans);
+        if selected {
+            line.style(Style::default().bg(Color::DarkGray))
+        } else {
+            line
         }
     }
 
@@ -508,8 +600,8 @@ impl CdvState {
                 Style::default().fg(Color::DarkGray),
             ));
         } else {
-            for row in self.file_rows() {
-                lines.push(self.file_line(&row));
+            for (index, row) in self.file_rows().iter().enumerate() {
+                lines.push(self.file_line(row, index == self.selected));
             }
         }
         lines
@@ -533,6 +625,14 @@ impl CdvState {
         );
         if let Some(compare) = &self.compare_with {
             line.push_str(&format!(" compare-with {compare}"));
+        }
+        // VIS-051: the reference enables `#cdvExternalDiff` when a tool is
+        // configured; a terminal has no GUI editor, so the port shows the tool
+        // name it would have launched.
+        if self.external_diff_available() {
+            if let Some(tool) = &self.external_diff {
+                line.push_str(&format!(" · external diff: {tool}"));
+            }
         }
         line
     }
@@ -660,6 +760,23 @@ mod tests {
         }
     }
 
+    /// The two-step load the app performs: a loading panel, then the details.
+    ///
+    /// The runtime never builds a loaded commit panel in one shot — it starts in
+    /// the loading state (`CdvState::loading`) and fills it via `loaded`, which
+    /// is what `open_cdv` does. The tests drive that same transition so they
+    /// cannot drift from the real path.
+    fn loaded_commit(
+        row: RowIdx,
+        detail: files::CommitDetail,
+        changes: Vec<GitFileChange>,
+    ) -> CdvState {
+        let hash = detail.hash.clone();
+        let mut state = CdvState::loading(row, &hash, CdvKind::Commit, None);
+        state.loaded(detail, changes);
+        state
+    }
+
     fn text_of(lines: &[Line<'static>]) -> String {
         lines
             .iter()
@@ -686,7 +803,7 @@ mod tests {
 
     #[test]
     fn vis_038_the_summary_shows_every_key_value_row() {
-        let state = CdvState::commit(0, detail(), vec![]);
+        let state = loaded_commit(0, detail(), vec![]);
         let text = text_of(&state.summary_lines());
         assert!(text.contains("Commit: abcdef1234567890"), "{text}");
         assert!(text.contains("Parents: 1111111, 2222222"), "{text}");
@@ -710,7 +827,7 @@ mod tests {
     fn vis_038_author_date_appears_only_when_it_differs() {
         let mut detail = detail();
         detail.author_date = 1_600_000_000;
-        let state = CdvState::commit(0, detail, vec![]);
+        let state = loaded_commit(0, detail, vec![]);
         let text = text_of(&state.summary_lines());
         assert!(text.contains("Author Date: 2020-09-13 12:26:40Z"), "{text}");
         assert!(
@@ -723,7 +840,7 @@ mod tests {
     fn vis_038_parents_read_none_for_a_root_commit() {
         let mut detail = detail();
         detail.parents.clear();
-        let state = CdvState::commit(0, detail, vec![]);
+        let state = loaded_commit(0, detail, vec![]);
         assert!(text_of(&state.summary_lines()).contains("Parents: None"));
     }
 
@@ -731,7 +848,7 @@ mod tests {
     fn vis_038_an_absent_email_leaves_no_angle_brackets() {
         let mut detail = detail();
         detail.author_email.clear();
-        let state = CdvState::commit(0, detail, vec![]);
+        let state = loaded_commit(0, detail, vec![]);
         let text = text_of(&state.summary_lines());
         assert!(text.contains("Author: Ada Lovelace\n"), "{text}");
         assert!(!text.contains("Ada Lovelace <>"), "{text}");
@@ -742,7 +859,7 @@ mod tests {
         let mut detail = detail();
         detail.signature_status = 'G';
         detail.signature_signer = "Ada".to_string();
-        let state = CdvState::commit(0, detail, vec![]);
+        let state = loaded_commit(0, detail, vec![]);
         let text = text_of(&state.summary_lines());
         assert!(text.contains('G'), "{text}");
         // `GIT_SIGNATURE_STATUS_DESCRIPTIONS['G']` is "Valid Signature"
@@ -783,7 +900,7 @@ mod tests {
             Some(3),
             Some(1),
         )];
-        let mut state = CdvState::commit(0, detail(), changes);
+        let mut state = loaded_commit(0, detail(), changes);
         assert_eq!(state.view, FileView::Tree);
         assert!(text_of(&state.lines()).contains("Tree View"));
 
@@ -801,7 +918,7 @@ mod tests {
             change(GitFileStatus::Added, "src/render/mod.rs", Some(9), Some(0)),
             change(GitFileStatus::Deleted, "README.md", Some(0), Some(4)),
         ];
-        let mut state = CdvState::commit(0, detail(), changes);
+        let mut state = loaded_commit(0, detail(), changes);
 
         let tree = state.file_rows();
         assert!(
@@ -831,7 +948,7 @@ mod tests {
             Some(1),
             Some(1),
         )];
-        let mut state = CdvState::commit(0, detail(), changes);
+        let mut state = loaded_commit(0, detail(), changes);
         assert!(state.file_rows().iter().any(|row| row.label == "main.rs"));
 
         state.toggle_folder("src");
@@ -853,7 +970,7 @@ mod tests {
             Some(3),
             Some(1),
         )];
-        let state = CdvState::commit(0, detail(), changes);
+        let state = loaded_commit(0, detail(), changes);
         let text = text_of(&state.lines());
         assert!(text.contains("[M]"), "{text}");
         assert!(text.contains("(+3|-1)"), "{text}");
@@ -865,7 +982,7 @@ mod tests {
             change(GitFileStatus::Added, "new.rs", Some(5), Some(0)),
             change(GitFileStatus::Deleted, "old.rs", Some(0), Some(5)),
         ];
-        let state = CdvState::commit(0, detail(), changes);
+        let state = loaded_commit(0, detail(), changes);
         let text = text_of(&state.lines());
         assert!(!text.contains("(+5|-0)"), "{text}");
         assert!(!text.contains("(+0|-5)"), "{text}");
@@ -874,7 +991,7 @@ mod tests {
     #[test]
     fn vis_047_a_binary_file_says_it_cannot_be_diffed() {
         let changes = vec![change(GitFileStatus::Modified, "logo.png", None, None)];
-        let state = CdvState::commit(0, detail(), changes);
+        let state = loaded_commit(0, detail(), changes);
         let text = text_of(&state.lines());
         assert!(text.contains("Unable to View Diff"), "{text}");
         assert!(text.contains("this is a binary file"), "{text}");
@@ -883,7 +1000,7 @@ mod tests {
     #[test]
     fn vis_047_a_deleted_file_says_only_that_it_cannot_be_diffed() {
         let changes = vec![change(GitFileStatus::Deleted, "gone.bin", None, None)];
-        let state = CdvState::commit(0, detail(), changes);
+        let state = loaded_commit(0, detail(), changes);
         let text = text_of(&state.lines());
         assert!(text.contains("(Unable to View Diff)"), "{text}");
         assert!(!text.contains("binary"), "{text}");
@@ -893,7 +1010,7 @@ mod tests {
     fn vis_048_a_submodule_gets_its_own_marker() {
         let mut submodule = change(GitFileStatus::Modified, "vendor/lib", None, None);
         submodule.submodule = true;
-        let state = CdvState::commit(0, detail(), vec![submodule]);
+        let state = loaded_commit(0, detail(), vec![submodule]);
         assert!(text_of(&state.lines()).contains("(submodule)"));
     }
 
@@ -901,7 +1018,7 @@ mod tests {
     fn vis_052_an_untracked_file_is_diffable() {
         let changes = vec![change(GitFileStatus::Untracked, "scratch.txt", None, None)];
         assert!(changes[0].diff_possible(), "untracked files can be diffed");
-        let state = CdvState::commit(0, detail(), changes);
+        let state = loaded_commit(0, detail(), changes);
         let text = text_of(&state.lines());
         assert!(text.contains("[U]"), "{text}");
         assert!(!text.contains("Unable to View Diff"), "{text}");
@@ -911,7 +1028,7 @@ mod tests {
     fn a_renamed_file_shows_both_paths() {
         let mut renamed = change(GitFileStatus::Renamed, "src/new.rs", Some(1), Some(1));
         renamed.old_path = "src/old.rs".to_string();
-        let state = CdvState::commit(0, detail(), vec![renamed]);
+        let state = loaded_commit(0, detail(), vec![renamed]);
         assert!(text_of(&state.lines()).contains("src/old.rs → src/new.rs"));
     }
 
@@ -923,7 +1040,7 @@ mod tests {
             Some(1),
             Some(1),
         )];
-        let mut state = CdvState::commit(0, detail(), changes);
+        let mut state = loaded_commit(0, detail(), changes);
         assert!(!text_of(&state.lines()).contains("Reviewed"));
         state.toggle_reviewed("src/main.rs");
         assert!(state.is_reviewed("src/main.rs"));
@@ -940,14 +1057,14 @@ mod tests {
             Some(1),
             Some(1),
         )];
-        let mut state = CdvState::commit(0, detail(), changes);
+        let mut state = loaded_commit(0, detail(), changes);
         state.last_viewed_file = Some("src/main.rs".to_string());
         assert!(text_of(&state.lines()).contains("(Last Viewed)"));
     }
 
     #[test]
     fn an_empty_commit_says_so() {
-        let state = CdvState::commit(0, detail(), vec![]);
+        let state = loaded_commit(0, detail(), vec![]);
         let text = text_of(&state.lines());
         assert!(text.contains("Files (0)"), "{text}");
         assert!(text.contains("No file changes."), "{text}");
@@ -988,7 +1105,7 @@ mod tests {
 
     #[test]
     fn resizing_clamps_to_the_reference_bounds() {
-        let mut state = CdvState::commit(0, detail(), vec![]);
+        let mut state = loaded_commit(0, detail(), vec![]);
         assert_eq!(state.height, DEFAULT_HEIGHT);
         state.resize(100);
         assert_eq!(state.height, MAX_HEIGHT);
@@ -998,7 +1115,7 @@ mod tests {
 
     #[test]
     fn the_panel_never_swallows_the_commit_list() {
-        let mut state = CdvState::commit(0, detail(), vec![]);
+        let mut state = loaded_commit(0, detail(), vec![]);
         state.height = MAX_HEIGHT;
         let height = panel_height(&state, 24, 1);
         assert_eq!(height, 24 - 1 - MIN_LIST_ROWS);
@@ -1009,7 +1126,7 @@ mod tests {
     #[test]
     fn the_status_line_names_the_kind_the_view_and_the_file_count() {
         let changes = vec![change(GitFileStatus::Added, "a.rs", Some(1), Some(0))];
-        let mut state = CdvState::commit(7, detail(), changes);
+        let mut state = loaded_commit(7, detail(), changes);
         state.toggle_view();
         let line = state.status_line();
         assert!(line.contains("Commit Details"), "{line}");
