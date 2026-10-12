@@ -29,8 +29,11 @@ pub const FIXED_HEADERS: [&str; 2] = ["idx", "hash"];
 
 /// The header labels for the current [`ColumnState`].
 ///
-/// Always `idx`, `hash`, `refs`; `date`, `author` and `subject` only when the
+/// Always `idx` and `hash`; `date`, `author` and `subject` only when the
 /// corresponding column is visible.
+///
+/// There is no `refs` column (T7): each commit's refs are drawn on their own
+/// line above it, so a column would print them twice.
 pub fn headers(columns: &ColumnState) -> Vec<&'static str> {
     let mut out = vec![FIXED_HEADERS[0], FIXED_HEADERS[1]];
     if columns.date {
@@ -42,7 +45,6 @@ pub fn headers(columns: &ColumnState) -> Vec<&'static str> {
     if columns.commit {
         out.push("subject");
     }
-    out.push("refs");
     out
 }
 
@@ -59,7 +61,6 @@ pub fn constraints(columns: &ColumnState) -> Vec<ratatui::layout::Constraint> {
     if columns.commit {
         out.push(Min(12));
     }
-    out.push(Length(20));
     out
 }
 
@@ -85,14 +86,18 @@ pub fn header(columns: &ColumnState) -> TuiRow<'static> {
 /// The display-row window the table has to reproduce (M4-W12/T1, T4).
 ///
 /// The table and [`crate::render::graph_widget::GraphWidget`] must agree on
-/// where every block sits, so the three inputs that decide that travel
-/// together. They mirror the same-named fields on the graph widget.
+/// where every block sits, so the inputs that decide that travel together. They
+/// mirror the same-named fields on the graph widget.
 #[derive(Debug, Clone, Copy)]
 pub struct TableWindow<'a> {
     /// The display-row height of every commit row, indexed by row. A block is
     /// `refs + commit + details + diff`, so a row is usually taller than one
     /// line.
     pub heights: &'a [u16],
+    /// The rows each commit spends on its refs line before its own row (T7), so
+    /// the commit line is written `refs` display rows below the block's top. A
+    /// missing entry is `0`.
+    pub refs: &'a [u16],
     /// The row order the active tab shows. The Branches filter drops the rows it
     /// excludes, and the table follows that order.
     pub visible: &'a [RowIdx],
@@ -123,6 +128,7 @@ pub fn commits_table_window(
 ) -> Table<'static> {
     let TableWindow {
         heights,
+        refs,
         visible,
         leading,
     } = window;
@@ -142,23 +148,26 @@ pub fn commits_table_window(
             continue;
         };
         let height = heights.get(i as usize).copied().unwrap_or(1).max(1) as u32;
+        let refs = refs.get(i as usize).copied().unwrap_or(0) as u32;
         let top = cursor;
         cursor += height;
         if cursor <= scroll {
             continue; // entirely above the viewport
         }
 
-        // The row's own line is only shown when its top is in view; if it is
-        // scrolled halfway off, the visible part is spacer.
-        if top >= scroll {
+        // T7: the refs line owns the block's first display row, so the commit
+        // line is written `refs` rows lower. Every other row of the block is a
+        // blank spacer the inline blocks paint over.
+        let commit_at = top + refs;
+        let gap_end = commit_at.min(cursor).max(top.max(scroll));
+        for _ in top.max(scroll)..gap_end {
+            body.push(spacer_row());
+        }
+        if commit_at >= scroll {
             body.push(commit_row(i as usize, commit, selected, columns, find));
         }
-        if height > 1 {
-            let first_gap = top + 1;
-            let visible_from = first_gap.max(scroll);
-            for _ in 0..(cursor - visible_from) {
-                body.push(spacer_row());
-            }
+        for _ in (commit_at + 1).max(scroll)..cursor {
+            body.push(spacer_row());
         }
     }
 
@@ -186,7 +195,6 @@ fn commit_row(
     let hash = Style::default().fg(Color::Yellow);
     let date = Style::default().fg(Color::Green);
     let author = Style::default().fg(Color::Magenta);
-    let refs = Style::default().fg(Color::Cyan);
 
     // The row-level tint above only covers the cells the table paints; every
     // text cell is built through `highlighted` so the match spans win.
@@ -208,11 +216,6 @@ fn commit_row(
     if columns.commit {
         cells.push(TuiCell::from(highlighted(&commit.subject, row_tint, find)));
     }
-    cells.push(TuiCell::from(highlighted(
-        &commit.refs.join(", "),
-        refs,
-        find,
-    )));
     let mut row = TuiRow::new(cells);
     if row_tint != Style::default() {
         row = row.style(row_tint);
@@ -305,12 +308,14 @@ mod tests {
     }
 
     #[test]
-    fn header_names_all_five_columns() {
+    fn header_names_every_visible_column() {
         let headers = headers(&ColumnState::default());
-        assert_eq!(headers.len(), 6, "idx, hash, date, author, subject, refs");
+        assert_eq!(headers.len(), 5, "idx, hash, date, author, subject");
         assert_eq!(headers[0], FIXED_HEADERS[0]);
         assert_eq!(headers[1], FIXED_HEADERS[1]);
-        assert_eq!(headers[5], "refs");
+        assert_eq!(headers[4], "subject");
+        // T7: refs have their own line above the commit, never a column.
+        assert!(!headers.contains(&"refs"));
     }
 
     #[test]
@@ -320,11 +325,11 @@ mod tests {
             author: false,
             ..Default::default()
         };
-        assert_eq!(headers(&columns), vec!["idx", "hash", "subject", "refs"]);
-        assert_eq!(constraints(&columns).len(), 4);
-        columns.commit = false;
-        assert_eq!(headers(&columns), vec!["idx", "hash", "refs"]);
+        assert_eq!(headers(&columns), vec!["idx", "hash", "subject"]);
         assert_eq!(constraints(&columns).len(), 3);
+        columns.commit = false;
+        assert_eq!(headers(&columns), vec!["idx", "hash"]);
+        assert_eq!(constraints(&columns).len(), 2);
     }
 
     /// A `heights` slice of `n` rows, all `1` except `expanded` (given `1 + extra`).
@@ -339,10 +344,22 @@ mod tests {
         (0..n as RowIdx).collect()
     }
 
-    /// The [`TableWindow`] for a heights / visible / leading triple.
+    /// The [`TableWindow`] for a heights / visible / leading triple, with no
+    /// refs lines (the pre-T7 shape).
     fn window<'a>(heights: &'a [u16], visible: &'a [RowIdx], leading: u16) -> TableWindow<'a> {
+        window_with_refs(heights, &[], visible, leading)
+    }
+
+    /// The [`TableWindow`] for a heights / refs / visible / leading quad.
+    fn window_with_refs<'a>(
+        heights: &'a [u16],
+        refs: &'a [u16],
+        visible: &'a [RowIdx],
+        leading: u16,
+    ) -> TableWindow<'a> {
         TableWindow {
             heights,
+            refs,
             visible,
             leading,
         }

@@ -239,6 +239,7 @@ fn render_to_text(graph: &GraphLayout) -> String {
                     scroll: 0,
                     leading: 0,
                     heights: &heights,
+                    refs: &[],
                     visible: &visible,
                 },
                 area,

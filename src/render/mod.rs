@@ -959,9 +959,14 @@ fn graph_view(
         Some(state.selected)
     };
 
-    // One display-row height per commit row, indexed by row (T1/T3/T7).
+    // One display-row height per commit row, indexed by row (T1/T3/T7), plus the
+    // refs line each row spends above its commit (T7). The table and the graph
+    // read both, so display row `d` is the same row in each.
     let heights: Vec<u16> = (0..state.rows.len() as RowIdx)
         .map(|row| state.row_height(row))
+        .collect();
+    let refs: Vec<u16> = (0..state.rows.len() as RowIdx)
+        .map(|row| state.block_parts(row).refs)
         .collect();
     let visible = state.visible_rows();
     let leading = state.uncommitted_height();
@@ -975,6 +980,7 @@ fn graph_view(
             scroll: state.scroll,
             leading,
             heights: &heights,
+            refs: &refs,
             visible: &visible,
         },
         body,
@@ -985,6 +991,7 @@ fn graph_view(
             &state.rows,
             TableWindow {
                 heights: &heights,
+                refs: &refs,
                 visible: &visible,
                 leading,
             },
@@ -997,7 +1004,20 @@ fn graph_view(
     );
 
     // T3/T4/T5/T7 — the inline blocks paint over the rows the table reserved.
-    draw_inline_blocks(frame, body, graph_width, state, view);
+    // `body` is the graph column, so widen it to the whole area: the blocks
+    // start after the graph and subtract `graph_width` themselves to find the
+    // text column. Passing the narrow rect makes their width zero, and then
+    // nothing is painted at all.
+    draw_inline_blocks(
+        frame,
+        Rect {
+            width: area.width,
+            ..body
+        },
+        graph_width,
+        state,
+        view,
+    );
 }
 
 /// Draw every inline block over the body, clipped to what is on screen.
@@ -1221,12 +1241,178 @@ fn column_summary(columns: &ColumnState) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::{AppState, DiffSource, InlineDiff};
+    use crate::cdv::{CdvKind, CdvState};
     use crate::menu::{ContextMenu, MenuContext, MenuSurface};
     use crate::render::mock::demo_layout;
 
     #[test]
     fn graph_width_uses_the_contract_pitch() {
         assert_eq!(graph_width(&demo_layout()), 4);
+    }
+
+    /// Render the whole UI into a headless backend and return the screen text.
+    ///
+    /// The W12 surfaces are inline blocks painted *over* the rows the commit
+    /// table reserves, so only a real `ui` draw proves they land where the
+    /// mockup puts them — a unit test of the block builder would pass even if
+    /// nothing reached the screen.
+    fn screen(state: &AppState, width: u16, height: u16) -> Vec<String> {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let view = ViewOptions {
+            graph: Some(&state.layout),
+            // `make_view` marks the mock fixture's first row as the
+            // uncommitted entry; mirror that so the draw matches the app's.
+            uncommitted: Some(0),
+            ..ViewOptions::TEXT_ONLY
+        };
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
+        terminal
+            .draw(|frame| ui(frame, state, &view))
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+        (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol().to_string())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect()
+    }
+
+    /// The index and text of the single line holding `needle`.
+    fn line_with<'a>(rows: &'a [String], needle: &str) -> (usize, &'a str) {
+        let hits: Vec<(usize, &String)> = rows
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| line.contains(needle))
+            .collect();
+        assert_eq!(
+            hits.len(),
+            1,
+            "expected exactly one line with {needle:?}, got {}\n{}",
+            hits.len(),
+            rows.join("\n")
+        );
+        (hits[0].0, hits[0].1.as_str())
+    }
+
+    /// The mock row carrying the `HEAD -> main` ref.
+    fn head_row(state: &AppState) -> RowIdx {
+        state
+            .rows
+            .iter()
+            .position(|commit| commit.abbrev == "a1b2c3d")
+            .expect("the mock HEAD commit") as RowIdx
+    }
+
+    /// T7 — a row with refs spends its first display row on the refs line, so
+    /// the refs read as a heading over their commit instead of a column beside
+    /// it. The commit text and its graph vertex stay on the commit's own row.
+    #[test]
+    fn the_refs_line_sits_above_its_commit_row() {
+        let state = AppState::demo();
+        let rows = screen(&state, 120, 24);
+
+        let (refs_at, refs_line) = line_with(&rows, "HEAD -> main");
+        assert!(
+            !refs_line.contains("a1b2c3d"),
+            "the refs line must not carry the commit itself: {refs_line:?}"
+        );
+
+        let commit = &rows[refs_at + 1];
+        assert!(
+            commit.contains("a1b2c3d") && commit.contains("Add graph renderer widget"),
+            "the commit row must follow its refs line, got {commit:?}"
+        );
+        // The vertex travels with the commit, not with the refs heading.
+        assert!(
+            commit.trim_start().starts_with('◯'),
+            "the graph vertex must sit on the commit row, got {commit:?}"
+        );
+    }
+
+    /// T4 — the uncommitted section is the first thing in the Overview body: a
+    /// header with the count, a summary line, then one row per file, all above
+    /// the history.
+    #[test]
+    fn the_uncommitted_section_paints_above_the_history() {
+        let state = AppState::demo();
+        let rows = screen(&state, 120, 30);
+
+        let (header_at, _header) = line_with(&rows, &state.uncommitted.title());
+        let summary = &rows[header_at + 1];
+        assert!(
+            summary.contains("staged") && summary.contains("unstaged"),
+            "the summary line must split staged from unstaged: {summary:?}"
+        );
+
+        // One row per file, each carrying its path and its status letter.
+        for path in ["src/render/ui.rs", "src/render/tabs.rs"] {
+            assert!(
+                rows.iter().any(|line| line.contains(path)),
+                "no uncommitted row for {path} in\n{}",
+                rows.join("\n")
+            );
+        }
+
+        let (commit_at, _) = line_with(&rows, "Add graph renderer widget");
+        assert!(
+            header_at < commit_at,
+            "the section belongs above the history: header {header_at}, history {commit_at}"
+        );
+    }
+
+    /// T3 — expanding a row paints the commit-details panel directly under that
+    /// row, keeping the split-pane design inside the list.
+    #[test]
+    fn the_details_panel_paints_under_its_row() {
+        let mut state = AppState::demo();
+        let row = head_row(&state);
+        state.expanded.insert(row);
+        state.cdv = Some(CdvState::loading(row, "a1b2c3d", CdvKind::Commit, None));
+        let rows = screen(&state, 120, 40);
+
+        let (commit_at, _) = line_with(&rows, "Add graph renderer widget");
+        let panel = &rows[commit_at + 1];
+        assert!(
+            panel.contains("cdv: Commit Details"),
+            "the panel must open under its commit row, got {panel:?}"
+        );
+    }
+
+    /// T5 — the selected file's diff paints under the details panel, framed by
+    /// the `git diff` argv it came from.
+    #[test]
+    fn the_file_diff_paints_under_the_details_panel() {
+        let mut state = AppState::demo();
+        let row = head_row(&state);
+        state.expanded.insert(row);
+        state.cdv = Some(CdvState::loading(row, "a1b2c3d", CdvKind::Commit, None));
+        state.inline_diff = Some(InlineDiff {
+            title: "git show a1b2c3d -- src/lib.rs".to_string(),
+            lines: crate::diff::parse("@@ -1,2 +1,3 @@\n one\n+two\n"),
+            source: DiffSource::CommitFile {
+                row,
+                path: "src/lib.rs".to_string(),
+            },
+        });
+        let rows = screen(&state, 120, 40);
+
+        let (commit_at, _) = line_with(&rows, "Add graph renderer widget");
+        let (diff_at, _) = line_with(&rows, "git show a1b2c3d -- src/lib.rs");
+        assert!(
+            diff_at > commit_at,
+            "the diff belongs below its commit row: commit {commit_at}, diff {diff_at}"
+        );
+        assert!(
+            rows.iter().any(|line| line.contains("two")),
+            "the added line must be painted in\n{}",
+            rows.join("\n")
+        );
     }
 
     /// The bar's labels and the mouse router walk the same format strings, so a

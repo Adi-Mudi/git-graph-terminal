@@ -137,6 +137,7 @@ fn render_viewport_ms(graph: &layout::GraphLayout) -> u128 {
                     scroll: 0,
                     leading: 0,
                     heights: &heights,
+                    refs: &[],
                     visible: &visible,
                 },
                 area,

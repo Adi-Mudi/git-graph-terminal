@@ -38,6 +38,11 @@ pub struct GraphWidget<'a> {
     /// The display-row height of every layout row, indexed by row (M4-W12/T1:
     /// a block is `refs + commit + details + diff`). A missing entry is `1`.
     pub heights: &'a [u16],
+    /// The rows each layout row spends on its refs line before its commit
+    /// (M4-W12/T7). The vertex and the commit's lane cells belong to the commit
+    /// row, which therefore sits this many display rows below the block's top.
+    /// A missing entry is `0`.
+    pub refs: &'a [u16],
     /// The rows to draw, in order. The Branches tab hides the rows its filter
     /// excludes, so the widget can no longer assume `0..rows.len()`.
     pub visible: &'a [RowIdx],
@@ -73,7 +78,13 @@ impl Widget for GraphWidget<'_> {
             if top >= area.height as i32 {
                 break;
             }
-            let y = area.y + top as u16;
+            // T7: the refs line owns the block's first display row, so the
+            // commit's cells and vertex sit `refs` rows lower. When that lands
+            // past the bottom, only the refs line and the gap rows show.
+            let refs = self.refs.get(index as usize).copied().unwrap_or(0) as i32;
+            let commit_top = top + refs;
+            let commit_on_screen = commit_top < area.height as i32;
+            let y = area.y + commit_top as u16;
             let uncommitted = self.uncommitted == Some(index);
             let selected = self.selected == Some(index);
             let glyphs = self.ladder.glyphs();
@@ -84,66 +95,73 @@ impl Widget for GraphWidget<'_> {
                 uncommitted,
             );
 
-            for (col, cell) in built.cells.iter().enumerate() {
-                if col >= width {
-                    break;
-                }
-                let mut style = Style::default();
-                let colour = match built.colours[col] {
-                    Some(idx) => self.ladder.colour_of(&self.layout.palette, idx),
-                    None => self.ladder.uncommitted_colour(),
-                };
-                if let Some(colour) = colour {
-                    style = style.fg(colour);
-                }
-                if selected {
-                    style = style.add_modifier(Modifier::REVERSED);
-                }
-                buf[(area.x + col as u16, y)]
-                    .set_char(cell.glyph)
-                    .set_style(style);
-            }
-
-            // The vertex is a node, so it is painted last and wins its cell.
-            if let Some(vertex) = &row.vertex {
-                let col = cell_of(vertex.lane);
-                if col < width {
-                    let glyph = vertex_glyph(vertex, glyphs, uncommitted);
+            if commit_on_screen {
+                for (col, cell) in built.cells.iter().enumerate() {
+                    if col >= width {
+                        break;
+                    }
                     let mut style = Style::default();
-                    let colour = if uncommitted {
-                        self.ladder.uncommitted_colour()
-                    } else {
-                        self.ladder
-                            .colour_of(&self.layout.palette, vertex.colour_idx)
+                    let colour = match built.colours[col] {
+                        Some(idx) => self.ladder.colour_of(&self.layout.palette, idx),
+                        None => self.ladder.uncommitted_colour(),
                     };
                     if let Some(colour) = colour {
                         style = style.fg(colour);
-                        if !uncommitted {
-                            style = style.add_modifier(Modifier::BOLD);
-                        }
                     }
                     if selected {
                         style = style.add_modifier(Modifier::REVERSED);
                     }
                     buf[(area.x + col as u16, y)]
-                        .set_char(glyph)
+                        .set_char(cell.glyph)
                         .set_style(style);
                 }
-            }
 
-            // Keep the highlight a full-width bar even where the graph is empty.
-            if selected {
-                for col in built.cells.len()..width {
-                    buf[(area.x + col as u16, y)]
-                        .set_style(Style::default().add_modifier(Modifier::REVERSED));
+                // The vertex is a node, so it is painted last and wins its cell.
+                if let Some(vertex) = &row.vertex {
+                    let col = cell_of(vertex.lane);
+                    if col < width {
+                        let glyph = vertex_glyph(vertex, glyphs, uncommitted);
+                        let mut style = Style::default();
+                        let colour = if uncommitted {
+                            self.ladder.uncommitted_colour()
+                        } else {
+                            self.ladder
+                                .colour_of(&self.layout.palette, vertex.colour_idx)
+                        };
+                        if let Some(colour) = colour {
+                            style = style.fg(colour);
+                            if !uncommitted {
+                                style = style.add_modifier(Modifier::BOLD);
+                            }
+                        }
+                        if selected {
+                            style = style.add_modifier(Modifier::REVERSED);
+                        }
+                        buf[(area.x + col as u16, y)]
+                            .set_char(glyph)
+                            .set_style(style);
+                    }
+                }
+
+                // Keep the highlight a full-width bar even where the graph is empty.
+                if selected {
+                    for col in built.cells.len()..width {
+                        buf[(area.x + col as u16, y)]
+                            .set_style(Style::default().add_modifier(Modifier::REVERSED));
+                    }
                 }
             }
 
-            // Reserved expansion gap: repeat the down-going lane verticals so the
+            // Reserved gap rows: the refs line above the commit (T7) and any
+            // expansion below it. Repeat the down-going lane verticals so the
             // graph stays visually connected across the taller row (a `Segment`'s
-            // `col_to` is the lane that continues into the next row).
+            // `col_to` is the lane that continues into the next row). The
+            // commit's own row holds the cells and the vertex, so it is skipped.
             if height > 1 {
-                for step in 1..height {
+                for step in 0..height {
+                    if step == refs {
+                        continue;
+                    }
                     let gap_y = area.y + (top + step) as u16;
                     if gap_y >= area.bottom() {
                         break;
@@ -220,6 +238,7 @@ mod tests {
             scroll: 0,
             leading: 0,
             heights: &h,
+            refs: &[],
             visible: &v,
         };
         let out = lines(widget, 4, 5);
@@ -243,6 +262,7 @@ mod tests {
             scroll: 1,
             leading: 0,
             heights: &h,
+            refs: &[],
             visible: &v,
         };
         let out = lines(widget, 4, 2);
@@ -265,6 +285,7 @@ mod tests {
             scroll: 0,
             leading: 2,
             heights: &h,
+            refs: &[],
             visible: &v,
         };
         let out = lines(widget, 4, 4);
@@ -287,6 +308,7 @@ mod tests {
             scroll: 0,
             leading: 0,
             heights: &h,
+            refs: &[],
             visible: &v,
         };
         let area = Rect::new(0, 0, 4, 2);
@@ -313,6 +335,7 @@ mod tests {
             scroll: 1,
             leading: 0,
             heights: &h,
+            refs: &[],
             visible: &v,
         };
         let area = Rect::new(0, 0, 4, 1);
@@ -335,6 +358,7 @@ mod tests {
             scroll: 0,
             leading: 0,
             heights: &h,
+            refs: &[],
             visible: &v,
         };
         // One cell wide: no panic, only the first column is written.
@@ -356,6 +380,7 @@ mod tests {
             scroll: 0,
             leading: 0,
             heights: &h,
+            refs: &[],
             visible: &v,
         };
         let out = lines(widget, 4, 8);
