@@ -214,13 +214,13 @@ nothing opens it, the row is `BACKLOG` and says so: `MenuSurface::FileRow` (A65�
 | ACT-064 | Copy URL to Clipboard | BACKLOG | the `Link` menu is defined (A62/A63/A64) but nothing opens it — `ClickTarget` has no link arm |
 | ACT-065 | View Diff | DONE | menu A65 + `Enter` on a CDV file row → `Action::CdvFileViewDiff`; test `cdv_keys_stand_in_for_the_cdv_controls` |
 | ACT-066 | View File at this Revision | DONE | menu A66 + `o` → `Action::CdvFileViewRevision`; test `cdv_keys_stand_in_for_the_cdv_controls` |
-| ACT-067 | View Diff with Working File | BACKLOG | the `FileRow` menu row exists (DSP-060 plan is tested) but no key or click opens that surface |
-| ACT-068 | Open File (→ pager) | BACKLOG | same — `OpenFile`'s plan exists (`show :<path>`) but no key binds it |
+| ACT-067 | View Diff with Working File | DONE | `w`/`W` on a CDV file row → `Action::CdvFileViewDiffWithWorkingFile` → DSP-060 (`src/keymap.rs:193`); menu A67 also reachable by right-click now that `MenuContext.path` is filled (`src/main.rs:307`). Tests `the_new_cdv_keys_map_to_their_file_row_actions`, `the_new_cdv_keys_build_the_inventory_argv` |
+| ACT-068 | Open File (→ pager) | DONE | `e`/`E` → `Action::CdvFileOpen` → DSP-038 (`show :<path>`, `src/keymap.rs:194`); tests `the_new_cdv_keys_map_to_their_file_row_actions`, `the_new_cdv_keys_build_the_inventory_argv` |
 | ACT-069 | Mark as Reviewed | DESIGN-DIFFERENCE | in-session reviewed flag (`Space`), not VS Code workspace state; test `a_reviewed_file_is_marked` |
 | ACT-070 | Mark as Not Reviewed | DESIGN-DIFFERENCE | same in-session flag; test `a_reviewed_file_is_marked` |
-| ACT-071 | Reset File to this Revision… | BACKLOG | the `FileRow` menu row exists (DSP-049 plan is tested) but nothing opens that surface |
-| ACT-072 | Copy Absolute File Path to Clipboard | BACKLOG | same — DSP-011's payload is built but no entry point opens the `FileRow` menu |
-| ACT-073 | Copy Relative File Path to Clipboard | BACKLOG | same |
+| ACT-071 | Reset File to this Revision… | DONE | `R` → `Action::CdvFileResetToRevision` → DSP-049, gated behind the W6 confirmation dialog (`src/keymap.rs:198`). The shifted key is deliberate: a stray press must not arm a working-tree overwrite. Test `the_reset_key_stops_at_the_confirmation_dialog` |
+| ACT-072 | Copy Absolute File Path to Clipboard | DONE | `y` → `Action::CdvFileCopyAbsolutePath`; payload is the repo-joined path (`cdv_copy_text`, `src/app.rs:1217` region). Test `the_copy_keys_put_the_path_on_the_clipboard` |
+| ACT-073 | Copy Relative File Path to Clipboard | DONE | `Y` → `Action::CdvFileCopyRelativePath`; payload is the row's repo-relative path. A72/A73 previously shared one payload, so the case is what tells them apart. Tests `cdv_copy_text_is_absolute_for_y_and_relative_for_shift_y`, `the_copy_keys_put_the_path_on_the_clipboard` |
 | ACT-074 | Fetch (per remote) | BACKLOG | settings-widget action; widget not built |
 | ACT-075 | Prune (per remote) | BACKLOG | settings-widget action (DSP-041 plan exists) |
 | ACT-076 | Edit Remote | BACKLOG | settings-widget action (DSP-023 form exists) |
@@ -424,7 +424,7 @@ those rows say "no form field".
 | INT-026 | right click (commit row) | DONE | test `surface_at_routes_rows_refs_and_empty_space` |
 | INT-027 | right click (ref label) | DONE | test `surface_for_refs_prefers_branch_over_remote_over_tag` |
 | INT-028 | right click (column header) | DONE | test `surface_at_routes_the_header_row` |
-| INT-029 | right click (CDV file) | BACKLOG | the `FileRow` menu exists but `ClickTarget` (`src/app.rs:383-388`) has no file arm, so no click reaches it |
+| INT-029 | right click (CDV file) | DONE | `ClickTarget::CdvFile` (`src/app.rs:409`) + `open_menu_at` open `MenuSurface::FileRow` (`src/main.rs:307-312`); `MenuContext.path` is now populated, without which all nine A65…A73 rows rendered disabled. Test `surface_at_reads_the_docked_cdv_as_file_rows` |
 | INT-030 | click (URL / link) | BACKLOG | no in-view link navigation (see ACT-062/ACT-063) |
 | INT-031 | right click (URL / link) | BACKLOG | the `Link` menu exists but nothing routes a click to it (see INT-029) |
 | INT-032 | click / right click (anywhere else) | DONE | anything in the body falls back to the commit row; test `surface_at_routes_rows_refs_and_empty_space` |
@@ -445,8 +445,8 @@ those rows say "no form field".
 | INT-047 | drag CDV divider | NOT-PORTED | R3 pointer chrome |
 | INT-048 | click commit row (expand) | DESIGN-DIFFERENCE | `Enter` toggles; test `enter_toggles_the_selected_row_only` |
 | INT-049 | click same commit (collapse) | DESIGN-DIFFERENCE | `Enter` toggles; test `enter_toggles_the_selected_row_only` |
-| INT-050 | click folder (CDV tree) | BACKLOG | CDV file rows are cursor-driven (`Left`/`Right` collapse/expand), never clickable |
-| INT-051 | click (CDV file row) | BACKLOG | same — the CDV is reached by `Tab` + keys, not by the mouse |
+| INT-050 | click folder (CDV tree) | DONE | `ClickTarget::CdvFolder` (`src/app.rs:415`) → `toggle_cdv_folder` (`src/app.rs:1217`, left-click arm `src/main.rs:278`), the same open/closed flip the reference binds to `.fileTreeFolder` (`web/main.ts:2968-2978`). Test `a_folder_click_toggles_it_open_and_closed` |
+| INT-051 | click (CDV file row) | DONE | left-click resolves through `surface_at` → `CdvState::select_path` (`src/cdv.rs:339`, arm `src/main.rs:272-276`). Test `surface_at_reads_the_docked_cdv_as_file_rows` |
 | INT-052 | match case toggle (`Aa`) | DONE | `Alt+C`; test `case_sensitivity_follows_the_toggle` |
 | INT-053 | regex toggle (`.*`) | DONE | `Alt+R`; test `regex_mode_uses_the_engine` |
 | INT-054 | search scope | DONE | test `literal_search_covers_every_scope_branch` |
@@ -550,22 +550,22 @@ those rows say "no form field".
 |---|---|---|---|---|---|
 | Rulings register (§1) | 11 | 11 | 0 | 0 | 0 |
 | Dispatch map DSP (§2) | 62 | 49 | 11 | 2 | 0 |
-| Commands/Actions ACT (§3) | 111 | 47 | 20 | 5 | 39 |
+| Commands/Actions ACT (§3) | 111 | 52 | 20 | 5 | 34 |
 | Settings SET (§4) | 110 | 0 | 56 | 48 | 6 |
-| Interactions INT (§5) | 63 | 27 | 8 | 8 | 20 |
+| Interactions INT (§5) | 63 | 30 | 8 | 8 | 17 |
 | Visual states VIS (§6) | 59 | 43 | 10 | 3 | 3 |
 | Drift DRIFT (§7) | 9 | 2 | 7 | 0 | 0 |
-| **Total** | **425** | **179** | **112** | **66** | **68** |
+| **Total** | **425** | **187** | **112** | **66** | **60** |
 
-`DONE` = 179/425 (42%). Of the 246 non-DONE rows, **66 are deliberate terminal design differences**
+`DONE` = 187/425 (44%). Of the 238 non-DONE rows, **66 are deliberate terminal design differences**
 and **112 are absent by ruling** (R3 chrome / R4 code review / R5 source-only / R6 negatives);
-the remaining **68 are real gaps** — the W10 candidate list in §9.
+the remaining **60 are real gaps** — the W10 candidate list in §9.
 
 ### 8.1 Audit findings (defects found while building this ledger — not parity gaps)
 
-| ID | Finding | Where | Impact |
-|---|---|---|---|
-| AUDIT-001 | The **Clean Untracked Files** dialog offers a checkbox labelled *"Also remove ignored files (-x)"* bound to `include_untracked`, but `plan()` for `CleanUntrackedFiles` only reads `directories` — it never emits `-x`. Ticking that box does nothing. | `src/dialog.rs:557-565` vs `src/actions.rs:594-603` | a user-visible control that silently no-ops. Also: `include_untracked` *is* honoured by `PushStash`, so the same field name means two different things in two forms. Not fixed — see §10. |
+| ID | Finding | Where | Impact | Status |
+|---|---|---|---|---|
+| AUDIT-001 | The **Clean Untracked Files** dialog offers a checkbox labelled *"Also remove ignored files (-x)"* bound to `include_untracked`, but `plan()` for `CleanUntrackedFiles` only reads `directories` — it never emits `-x`. Ticking that box does nothing. | `src/dialog.rs:557-565` vs `src/actions.rs:605-613` | a user-visible control that silently no-ops. Also: `include_untracked` *is* honoured by `PushStash`, so the same field name means two different things in two forms. | **FIXED** in `3eb6102` (W10). `plan()` now matches all four clusters — `-f`, `-fd`, `-fx`, `-fdx` (`src/actions.rs:605-613`), so the checkbox is real and the stash meaning is unchanged. Test `clean_untracked_honours_directories_and_ignored_files` |
 
 ---
 
@@ -576,21 +576,39 @@ Every non-DONE row was classified into exactly one of: **quick win** (fits a wav
 or **out-of-scope** (ruled absent). The waves below cover **all 68** `BACKLOG` rows exactly once —
 no row is left unassigned, and no wave claims a row that is already `DONE`.
 
-### 9.1 Waves (68 BACKLOG rows)
+### 9.1 Waves (60 BACKLOG rows)
 
-| Wave | Theme | Rows (all `BACKLOG`) | Count | Why it is a quick win |
+| Wave | Theme | Rows | Count | Why it is a quick win |
 |---|---|---|---|---|
 | **W10-A** | **Settings subsystem** — the single biggest gap | SET-056, SET-057, SET-062, SET-063, SET-064, SET-065 | 6 | one config file + one settings-widget surface. Every knob below already exists as a hardcoded constant, so each is a one-line switch — and it is the prerequisite that unlocks §9.2 |
-| **W10-B** | **CDV file-row + link menus** — best value/effort ratio in the ledger | ACT-063, ACT-064, ACT-067, ACT-068, ACT-071, ACT-072, ACT-073, INT-029, INT-030, INT-031, INT-050, INT-051 | 12 | every menu row already carries its label, shortcut and `RefAction`; only `ClickTarget` (`src/app.rs:383-388`) needs `FileRow`/`Link` arms, plus 4 keys on the CDV |
+| **W10-B** | ~~**CDV file-row menu**~~ — ✅ **CLOSED in `3eb6102`** | ACT-067, ACT-068, ACT-071, ACT-072, ACT-073, INT-029, INT-050, INT-051 — all eight now `DONE`, listed for traceability only | **0** | shipped: `ClickTarget::CdvFile`/`CdvFolder`, `MenuContext.path` filled for `FileRow`, five keys `w e R y Y`, folder click-to-toggle, and the `body.height` fix that let the pointer reach the panel at all |
 | **W10-C** | **Toolbar / remote control bar** | ACT-008, ACT-074, ACT-075, ACT-076, ACT-077, ACT-078, ACT-102, INT-044, INT-062 | 9 | Fetch already has a complete Execute plan (see §2) and only lacks a key; the per-remote rows reuse the same plan with a different target |
 | **W10-D** | **Dropdowns (repo + branches multi-select)** | ACT-019, ACT-020, ACT-041, ACT-042, ACT-096, ACT-097, INT-037, INT-038, INT-039, INT-040, INT-041, INT-042, INT-060, INT-061 | 14 | one reusable multi-select widget clears all 14; the `SelectInDropdown` / `UnselectInDropdown` / `FollowInternalLink` menu stubs already exist to be filled in |
 | **W10-E** | **Commit muting** | VIS-014, VIS-015 | 2 | a filter over `src/data.rs` rows + a dim style. Depends on W10-A for SET-056/057 |
 | **W10-F** | **Mouse completeness** | INT-007, INT-008, INT-022, INT-024, INT-025 | 5 | the mouse router (`src/main.rs:238-276`) already hit-tests; each row is one new arm in the existing `match` |
 | **W10-G** | **Repo discovery / multi-repo** | ACT-003, ACT-105, VIS-056 | 3 | `maxDepthOfRepoSearch` walk + the "no repositories" page; the re-scan plan already exists in §2 |
-| **W10-H** | **Repo config + user details + view checkboxes** | ACT-079, ACT-080, ACT-081, ACT-082, ACT-083, ACT-084, ACT-085, ACT-086, ACT-087, ACT-090, ACT-091, ACT-092, ACT-093, ACT-095, ACT-098, ACT-101 | 16 | the forms already exist in `src/dialog.rs`; this is an entry-point problem, so it is blocked by W10-A |
+| **W10-H** | **Repo config + user details + view checkboxes + link menus** | ACT-063, ACT-064, ACT-079, ACT-080, ACT-081, ACT-082, ACT-083, ACT-084, ACT-085, ACT-086, ACT-087, ACT-090, ACT-091, ACT-092, ACT-093, ACT-095, ACT-098, ACT-101, INT-030, INT-031 | 20 | the forms already exist in `src/dialog.rs`, so most of this is an entry-point problem blocked by W10-A. The 4 link rows (ACT-063/064, INT-030/031) moved here from W10-B when the W10 plan found that **no code in the render path ever produces a URL** — `MenuContext::url` is only ever filled by a test literal (`src/app.rs:836`), so the `Link` menu needs issue-link detection (ACT-086/087) before a click can route to it |
 | **W10-I** | **External diff launch** | ACT-109 | 1 | spawn `$GIT_EXTERNAL_DIFF` / `git difftool`; availability is already computed in §6 |
 | **W10-J** | **AUDIT-001 fix** | §8.1 | 1 | one line in `plan()` (`-x` when `include_untracked`) or one label change; needs the user's call on which is right (Q1) |
-| | | **Total** | **68** | |
+| | | **Total** | **60** | |
+
+> **Revision note (W10 closure).** `3eb6102` closed the whole of W10-B: ACT-067/068/071/072/073 and
+> INT-029/050/051 flipped `BACKLOG` → `DONE`, and AUDIT-001 flipped to `FIXED`. §8 totals were
+> recomputed (DONE 179→187, BACKLOG 68→60) and §9.1 now lists 60 rows, so the wave set still equals
+> the `BACKLOG` set. One planning contradiction was found while closing it and resolved by the user:
+> the approved Subphase 2.5 specified `FileRowKind::Folder { .. } => None` while Subphase 5.1 listed
+> INT-050 ("click folder") as a row to close. The reference does bind a folder click
+> (`web/main.ts:2968-2978`), so `ClickTarget::CdvFolder` + `toggle_cdv_folder` were added and INT-050
+> closed for real rather than the row being marked `DONE` without the behaviour.
+
+> **Revision note (W10 planning).** W10-B was originally scoped as 12 rows, including the
+> four `Link`-surface rows (ACT-063, ACT-064, INT-030, INT-031). While writing the W10 plan
+> it turned out that **nothing in the render path produces a URL** — `MenuContext::url` is
+> only ever set by a literal in the test harness (`src/app.rs:836`), and there is no
+> issue-link extraction anywhere in `src/columns.rs` or `src/render/`. Those four rows were
+> therefore moved to W10-H, which already owns issue linking (ACT-086/087). The row totals
+> are unchanged (W10-B 12→8, W10-H 16→20, both still summing to 68) and **no row status
+> changed** — only the wave grouping did. The user approved this on 2026-10-12.
 
 ### 9.2 Promotion candidates (not gaps — recorded as `DESIGN-DIFFERENCE`/`NOT-PORTED`, no wave of their own)
 
@@ -622,9 +640,11 @@ R6 negatives (DRIFT-003…008) — all already carry their ruling id in §1.
 
 ## 10. Open questions for the user
 
-| ID | Question | Why it matters |
-|---|---|---|
-| Q1 | AUDIT-001: should the *"remove ignored files (-x)"* checkbox emit `-x`, or should its label change to match the stash behaviour? | it is a live no-op control in the shipped binary. Rule 2 forbids me fixing it silently — it is outside the approved T3 scope |
-| Q2 | For W10, is W10-B (12 rows for ~10 lines of `ClickTarget` + 4 key bindings) the right first wave, or is W10-A (the settings subsystem) worth more despite being larger? | the ledger's own numbers say W10-B is by far the cheapest way to move the `DONE` count, but W10-A is what unlocks §9.2 |
+| ID | Question | Why it matters | Resolution |
+|---|---|---|---|
+| Q1 | AUDIT-001: should the *"remove ignored files (-x)"* checkbox emit `-x`, or should its label change to match the stash behaviour? | it is a live no-op control in the shipped binary. Rule 2 forbids me fixing it silently — it is outside the approved T3 scope | **ANSWERED 2026-10-12 (W10)** — emit `-x`; the checkbox was right and `plan()` was wrong. The W10 plan made it Phase 1 and the user approved it. `PushStash` already read `include_untracked` that way, so changing the label would have made one field mean two things in the other direction. Fixed in `3eb6102`; test `clean_untracked_honours_directories_and_ignored_files` |
+| Q2 | For W10, is W10-B (12 rows for ~10 lines of `ClickTarget` + 4 key bindings) the right first wave, or is W10-A (the settings subsystem) worth more despite being larger? | the ledger's own numbers say W10-B is by far the cheapest way to move the `DONE` count, but W10-A is what unlocks §9.2 | **ANSWERED 2026-10-12 (W10)** — W10-B first, and it closed completely in `3eb6102` (8/8 rows, `DONE` 179→187). W10-A is still the next wave and is still the prerequisite for §9.2. The two `Link`-surface rows originally counted in W10-B were moved to W10-H during planning, as the revision note in §9.1 records |
+
+No open questions remain.
 
 <!-- LEDGER-END -->
