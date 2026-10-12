@@ -58,6 +58,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
+use crate::render::glyphs::GlyphSet;
 use crate::term::ladder::Ladder;
 
 use crate::files::{self, FileRow, FileRowKind, FileTree, FileView, GitFileChange, GitFileStatus};
@@ -774,7 +775,10 @@ impl CdvState {
     /// design, expanded in place`. The loading and error states have no mockup
     /// text, so they name themselves instead of claiming the pane is loaded.
     /// [`CdvState::status_line`] still carries the full state for `--dump`.
-    pub fn block_title(&self) -> String {
+    ///
+    /// The `├─` opener comes from `glyphs`, so an ASCII-rung terminal gets
+    /// `+-` instead of a box-drawing tee it cannot render.
+    pub fn block_title(&self, glyphs: &GlyphSet) -> String {
         let suffix = if self.loading {
             "loading…"
         } else if self.error.is_some() {
@@ -782,7 +786,12 @@ impl CdvState {
         } else {
             "same design, expanded in place"
         };
-        format!("├─ {} — {suffix}", self.kind.title())
+        format!(
+            "{}{} {} — {suffix}",
+            glyphs.tee_missing_left,
+            glyphs.horizontal,
+            self.kind.title()
+        )
     }
 
     /// The one-line panel state, for `--dump` evidence.
@@ -905,7 +914,7 @@ pub fn draw(frame: &mut Frame, area: Rect, state: &CdvState, focused: bool, ladd
         .borders(Borders::ALL)
         .border_set(ladder.border_set())
         .border_style(border)
-        .title(format!(" {} ", state.block_title()));
+        .title(format!(" {} ", state.block_title(ladder.glyphs())));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -932,6 +941,7 @@ pub fn draw(frame: &mut Frame, area: Rect, state: &CdvState, focused: bool, ladd
 mod tests {
     use super::*;
     use crate::data::UNCOMMITTED;
+    use crate::render::glyphs::{ASCII, UNICODE};
 
     fn change(
         status: GitFileStatus,
@@ -1338,12 +1348,26 @@ mod tests {
         let changes = vec![change(GitFileStatus::Added, "a.rs", Some(1), Some(0))];
         let state = loaded_commit(7, detail(), changes);
         assert_eq!(
-            state.block_title(),
+            state.block_title(&UNICODE),
             "├─ Commit Details — same design, expanded in place"
         );
 
         let loading = CdvState::loading(0, "a1b2c3d", CdvKind::Commit, None);
-        assert_eq!(loading.block_title(), "├─ Commit Details — loading…");
+        assert_eq!(
+            loading.block_title(&UNICODE),
+            "├─ Commit Details — loading…"
+        );
+    }
+
+    /// The block title's `├─` opener follows the ladder, so an ASCII-rung
+    /// terminal gets `+-` rather than a box-drawing tee it cannot render.
+    #[test]
+    fn the_block_title_opener_follows_the_glyph_rung() {
+        let state = loaded_commit(0, detail(), vec![]);
+        assert_eq!(
+            state.block_title(&ASCII),
+            "+- Commit Details — same design, expanded in place"
+        );
     }
 
     /// Mockup v3, `.pane .col` #1: `Branch` and `Tags` sit between the dates

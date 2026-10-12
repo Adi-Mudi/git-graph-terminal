@@ -59,6 +59,7 @@ use crate::layout::types::{GraphLayout, RowIdx};
 use crate::menu::ContextMenu;
 use crate::pager;
 use crate::render::columns::{commits_table_window, text_offset, TableWindow};
+use crate::render::glyphs::{Corner, GlyphSet};
 use crate::render::graph_widget::GraphWidget;
 use crate::term::ladder::{self, Dir, Ladder};
 
@@ -192,13 +193,23 @@ pub struct InlineBlock<'a> {
 }
 
 /// Every inline block the current state wants painted, in draw order.
-fn inline_blocks(state: &AppState, width: u16) -> Vec<InlineBlock<'_>> {
+///
+/// `ladder` supplies every box-drawing glyph these blocks compose — the refs
+/// line's `┌`/`│`, the uncommitted rows' `┌─`/`├─`/`└─` and the section's
+/// disclosure caret — so an ASCII-rung terminal gets `+`/`|`/`-` instead.
+fn inline_blocks(state: &AppState, width: u16, ladder: Ladder) -> Vec<InlineBlock<'_>> {
+    let glyphs = ladder.glyphs();
     let mut blocks: Vec<InlineBlock<'_>> = Vec::new();
 
     // T4 — the uncommitted section sits above the first commit.
     if state.tab == Tab::Overview && !state.uncommitted.is_empty() {
         let mut lines = vec![Line::styled(
-            format!(" {} ", state.uncommitted.title(state.uncommitted_open)),
+            format!(
+                " {} ",
+                state
+                    .uncommitted
+                    .title(ladder.disclosure(state.uncommitted_open))
+            ),
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
@@ -215,6 +226,7 @@ fn inline_blocks(state: &AppState, width: u16) -> Vec<InlineBlock<'_>> {
                     index,
                     total,
                     state.uncommitted_selected == Some(index),
+                    glyphs,
                 ));
             }
         }
@@ -243,7 +255,11 @@ fn inline_blocks(state: &AppState, width: u16) -> Vec<InlineBlock<'_>> {
             blocks.push(InlineBlock {
                 top,
                 lines: vec![Line::styled(
-                    format!("┌ refs │ {refs}"),
+                    format!(
+                        "{} refs {} {refs}",
+                        glyphs.sharp_corner(Corner::DownRight),
+                        glyphs.vertical
+                    ),
                     Style::default().fg(Color::Cyan),
                 )],
                 kind: BlockKind::Plain,
@@ -303,20 +319,21 @@ fn inline_blocks(state: &AppState, width: u16) -> Vec<InlineBlock<'_>> {
     blocks
 }
 
-/// One uncommitted file row: badge, path, counts, stage label (T4).
 /// The tree glyph that opens an uncommitted file row (`┌─`, `├─`, `└─`).
 ///
 /// The mockup hand-writes one glyph per row: `┌─` on the first, `└─` on the
 /// last, `├─` in between. A one-file section is both first and last, so it gets
-/// `└─`.
-fn tree_glyph(index: usize, total: usize) -> &'static str {
-    if total <= 1 || index + 1 >= total {
-        "└─"
+/// `└─`. The corner and the tee come from `glyphs`, so an ASCII-rung terminal
+/// gets `+-` on every row instead of box drawing it cannot render.
+fn tree_glyph(glyphs: &GlyphSet, index: usize, total: usize) -> String {
+    let lead = if total <= 1 || index + 1 >= total {
+        glyphs.sharp_corner(Corner::UpRight)
     } else if index == 0 {
-        "┌─"
+        glyphs.sharp_corner(Corner::DownRight)
     } else {
-        "├─"
-    }
+        glyphs.tee_missing_left
+    };
+    format!("{lead}{}", glyphs.horizontal)
 }
 
 /// One uncommitted file row: `  ┌─ A src/main.ts  staged  +12 −0`.
@@ -329,6 +346,7 @@ fn uncommitted_file_line(
     index: usize,
     total: usize,
     selected: bool,
+    glyphs: &GlyphSet,
 ) -> Line<'static> {
     let mut style = Style::default();
     if selected {
@@ -343,7 +361,7 @@ fn uncommitted_file_line(
     };
     let dim = Style::default().fg(Color::DarkGray);
     Line::from(vec![
-        Span::styled(format!("  {} ", tree_glyph(index, total)), dim),
+        Span::styled(format!("  {} ", tree_glyph(glyphs, index, total)), dim),
         Span::styled(format!("{} ", file.letter()), Style::default().fg(letter)),
         Span::styled(file.path.clone(), style),
         Span::styled(format!("  {}", file.stage_label()), dim),
@@ -1023,6 +1041,7 @@ fn graph_view(
             selected.map(|row| row as usize),
             &state.columns,
             state.find.visible.then_some(&state.find),
+            view.ladder,
         ),
         columns[1],
     );
@@ -1062,7 +1081,7 @@ fn draw_inline_blocks(
         return;
     }
 
-    for block in inline_blocks(state, width) {
+    for block in inline_blocks(state, width, view.ladder) {
         let top = body.y as i32 + block.top as i32 - state.scroll as i32;
         if top < body.y as i32 {
             continue;
@@ -1282,6 +1301,16 @@ mod tests {
     /// mockup puts them — a unit test of the block builder would pass even if
     /// nothing reached the screen.
     fn screen(state: &AppState, width: u16, height: u16) -> Vec<String> {
+        screen_with_ladder(state, width, height, Ladder::unlimited())
+    }
+
+    /// [`screen`] at a chosen glyph rung, for the ladder tests.
+    fn screen_with_ladder(
+        state: &AppState,
+        width: u16,
+        height: u16,
+        ladder: Ladder,
+    ) -> Vec<String> {
         use ratatui::backend::TestBackend;
         use ratatui::Terminal;
         // The real loop refreshes `status.width`/`status.height` from the
@@ -1302,7 +1331,7 @@ mod tests {
             // `make_view` marks the mock fixture's first row as the
             // uncommitted entry; mirror that so the draw matches the app's.
             uncommitted: Some(0),
-            ..ViewOptions::TEXT_ONLY
+            ladder,
         };
         let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
         terminal
@@ -1433,6 +1462,59 @@ mod tests {
         );
     }
 
+    /// The W12 inline surfaces compose their box drawing from the ladder rather
+    /// than spelling the glyphs out, so an ASCII-rung terminal gets `+` / `|` /
+    /// `-` instead of characters it cannot render. The Unicode rung must be
+    /// unchanged — this is a fallback, not a restyle.
+    #[test]
+    fn the_inline_surfaces_follow_the_glyph_rung() {
+        let mut state = AppState::demo();
+
+        let unicode = screen(&state, 120, 30);
+        assert!(
+            unicode.iter().any(|row| row.contains("┌ refs │")),
+            "the Unicode rung keeps the mockup's refs line"
+        );
+        assert!(
+            unicode.iter().any(|row| row.contains("┌─ M ")),
+            "the Unicode rung keeps the mockup's tree glyphs"
+        );
+
+        let ascii = screen_with_ladder(&state, 120, 30, Ladder::mono_ascii());
+        assert!(
+            ascii.iter().any(|row| row.contains("+ refs |")),
+            "the refs line falls back to ASCII: {ascii:#?}"
+        );
+        assert!(
+            ascii.iter().any(|row| row.contains("+- M ")),
+            "the tree glyphs fall back to ASCII: {ascii:#?}"
+        );
+        for row in &ascii {
+            assert!(
+                !row.contains(['┌', '│', '├', '└', '─']),
+                "no box drawing survives at the ASCII rung: {row:?}"
+            );
+        }
+
+        // The details pane's `├─` opener is a ladder glyph too.
+        state.expanded.insert(head_row(&state));
+        state.cdv = Some(CdvState::loading(
+            head_row(&state),
+            "a1b2c3d",
+            CdvKind::Commit,
+            None,
+        ));
+        let open = screen(&state, 120, 40);
+        assert!(open.iter().any(|row| row.contains("├─ Commit Details")));
+        let open_ascii = screen_with_ladder(&state, 120, 40, Ladder::mono_ascii());
+        assert!(
+            open_ascii
+                .iter()
+                .any(|row| row.contains("+- Commit Details")),
+            "the details title falls back to ASCII: {open_ascii:#?}"
+        );
+    }
+
     /// T8 — the evidence gallery: print one full frame per W12 surface so the
     /// wave report can quote real screens instead of describing them.
     ///
@@ -1534,6 +1616,14 @@ mod tests {
             "Overview — Enter expanded the HEAD row (loaded, one file diff open)",
             &loaded,
         );
+
+        // The same frame at the ASCII rung. Every box glyph the W12 surfaces
+        // compose — the refs line, the tree openers, the carets, the details
+        // title — has to fall back here, so this frame is the ladder evidence.
+        println!("\n===== Overview — the same loaded frame at the ASCII rung =====\n");
+        for line in screen_with_ladder(&loaded, 120, 40, Ladder::mono_ascii()) {
+            println!("{line}");
+        }
     }
 
     /// T4 — the uncommitted section is the first thing in the Overview body: a
@@ -1544,7 +1634,7 @@ mod tests {
         let state = AppState::demo();
         let rows = screen(&state, 120, 30);
 
-        let (header_at, _header) = line_with(&rows, &state.uncommitted.title(true));
+        let (header_at, _header) = line_with(&rows, &state.uncommitted.title('▼'));
         let summary = &rows[header_at + 1];
         assert!(
             summary.contains("staged") && summary.contains("unstaged"),

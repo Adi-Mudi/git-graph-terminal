@@ -414,6 +414,21 @@ impl Ladder {
         }
     }
 
+    /// The disclosure marker for a collapsible block: `▼` open, `▶` closed.
+    ///
+    /// Used by the inline surfaces the mockup draws carets on — the uncommitted
+    /// section's header and the trailing column of every commit row. The ASCII
+    /// fallback reuses [`ArrowSet`]'s `v` / `>` so a seven-bit terminal sees the
+    /// same shape the arrow rung would give it.
+    pub const fn disclosure(&self, open: bool) -> char {
+        match (self.tier, open) {
+            (GlyphTier::Unicode, true) => '▼',
+            (GlyphTier::Unicode, false) => '▶',
+            (_, true) => 'v',
+            (_, false) => '>',
+        }
+    }
+
     /// The text-cursor block (find widget).
     pub const fn caret(&self) -> char {
         if matches!(self.tier, GlyphTier::Unicode) {
@@ -648,6 +663,8 @@ mod tests {
         assert_eq!(unicode.border_set().top_left, "┌");
         assert_eq!(unicode.checked(), '✓');
         assert_eq!(unicode.pointer(), '▸');
+        assert_eq!(unicode.disclosure(true), '▼');
+        assert_eq!(unicode.disclosure(false), '▶');
 
         let ascii = Ladder::mono_ascii();
         assert_eq!(ascii.arrow(Dir::Left), '<');
@@ -658,6 +675,12 @@ mod tests {
         assert_eq!(ascii.border_set().vertical_left, "|");
         assert_eq!(ascii.checked(), 'x');
         assert_eq!(ascii.pointer(), '>');
+        assert_eq!(ascii.disclosure(true), 'v');
+        assert_eq!(ascii.disclosure(false), '>');
+        // The dumb tier has no box drawing either, so it takes the same pair.
+        let dumb = Ladder::from_tier(GlyphTier::Dumb);
+        assert_eq!(dumb.disclosure(true), 'v');
+        assert_eq!(dumb.disclosure(false), '>');
     }
 
     #[test]

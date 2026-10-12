@@ -17,6 +17,7 @@ use crate::find::FindWidget;
 use crate::layout::types::{Lane, RowIdx};
 use crate::render::cell::CELLS_PER_LANE;
 use crate::render::{highlighted, FIND_CURRENT_BG};
+use crate::term::ladder::Ladder;
 
 /// Screen column where the text columns start — `2 * max_lane + 2`.
 pub fn text_offset(max_lane: Lane) -> u16 {
@@ -30,7 +31,8 @@ pub const FIXED_HEADERS: [&str; 2] = ["idx", "hash"];
 /// The label of the trailing caret column.
 ///
 /// The mockup puts a `▼` / `▶` at the end of every commit row and gives it no
-/// header text, so the label is empty.
+/// header text, so the label is empty. The glyphs themselves come from the
+/// ladder (`Ladder::disclosure`), so an ASCII-rung terminal shows `v` / `>`.
 pub const CARET_HEADER: &str = "";
 
 /// The header labels for the current [`ColumnState`].
@@ -113,7 +115,8 @@ pub struct TableWindow<'a> {
     /// (T4).
     pub leading: u16,
     /// Which rows are expanded, indexed by row. The trailing caret column shows
-    /// `▼` for an expanded row and `▶` otherwise. A missing entry is `false`.
+    /// the ladder's disclosure marker — `▼` for an expanded row and `▶`
+    /// otherwise on the Unicode rung. A missing entry is `false`.
     pub expanded: &'a [bool],
 }
 
@@ -136,6 +139,7 @@ pub fn commits_table_window(
     selected: Option<usize>,
     columns: &ColumnState,
     find: Option<&FindWidget>,
+    ladder: Ladder,
 ) -> Table<'static> {
     let TableWindow {
         heights,
@@ -183,6 +187,7 @@ pub fn commits_table_window(
                 expanded.get(i as usize).copied().unwrap_or(false),
                 columns,
                 find,
+                ladder,
             ));
         }
         for _ in (commit_at + 1).max(scroll)..cursor {
@@ -198,7 +203,8 @@ pub fn commits_table_window(
 /// One commit body row (absolute index `idx`).
 ///
 /// `expanded` drives the trailing caret column: the mockup ends every commit
-/// row with `▼` when its details are open and `▶` when they are closed.
+/// row with a caret when its details are open and another when they are closed,
+/// both taken from `ladder` so the pair follows the glyph rung.
 fn commit_row(
     idx: usize,
     commit: &Commit,
@@ -206,6 +212,7 @@ fn commit_row(
     expanded: bool,
     columns: &ColumnState,
     find: Option<&FindWidget>,
+    ladder: Ladder,
 ) -> TuiRow<'static> {
     let mut style = Style::default();
     if selected == Some(idx) {
@@ -240,7 +247,7 @@ fn commit_row(
         cells.push(TuiCell::from(highlighted(&commit.subject, row_tint, find)));
     }
     cells.push(TuiCell::from(Span::styled(
-        if expanded { "▼" } else { "▶" },
+        ladder.disclosure(expanded).to_string(),
         dim,
     )));
     let mut row = TuiRow::new(cells);
@@ -297,6 +304,7 @@ fn civil_from_days(days: i64) -> (i64, i64, i64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::term::ladder::Ladder;
 
     fn commit(abbrev: &str, date: i64, subject: &str, refs: &[&str]) -> Commit {
         Commit {
@@ -410,6 +418,7 @@ mod tests {
             Some(1),
             &columns,
             None,
+            Ladder::unlimited(),
         );
         let _ = commits_table_window(
             &rows,
@@ -418,8 +427,17 @@ mod tests {
             None,
             &columns,
             None,
+            Ladder::unlimited(),
         );
-        let _ = commits_table_window(&[], window(&[], &[], 0), 0, None, &columns, None);
+        let _ = commits_table_window(
+            &[],
+            window(&[], &[], 0),
+            0,
+            None,
+            &columns,
+            None,
+            Ladder::unlimited(),
+        );
     }
 
     #[test]
@@ -434,6 +452,7 @@ mod tests {
             None,
             &ColumnState::default(),
             None,
+            Ladder::unlimited(),
         );
         let rendered = render_table(table, 60, 8);
         let line_of = |needle: &str| -> usize {
@@ -484,6 +503,7 @@ mod tests {
                 Some(1),
                 &ColumnState::default(),
                 None,
+                Ladder::unlimited(),
             );
             render_table(table, 60, 12)
         };
@@ -509,5 +529,39 @@ mod tests {
             2 + 1 + 4,
             "the expanded row reserves its four spacer rows"
         );
+    }
+
+    /// T7's trailing caret column is a ladder glyph, not a literal: the Unicode
+    /// rung shows `▼` / `▶`, the ASCII rung `v` / `>`.
+    #[test]
+    fn the_trailing_caret_follows_the_glyph_rung() {
+        let rows = vec![commit("aaaaaaa", 0, "root", &[])];
+        let heights = flat_heights(1, &[], 0);
+        let visible = all_visible(1);
+        let render = |ladder: Ladder, expanded: &[bool]| -> String {
+            let table = commits_table_window(
+                &rows,
+                TableWindow {
+                    expanded,
+                    ..window(&heights, &visible, 0)
+                },
+                0,
+                None,
+                &ColumnState::default(),
+                None,
+                ladder,
+            );
+            render_table(table, 40, 3).join("\n")
+        };
+
+        assert!(render(Ladder::unlimited(), &[false]).contains('▶'));
+        assert!(render(Ladder::unlimited(), &[true]).contains('▼'));
+
+        let closed = render(Ladder::mono_ascii(), &[false]);
+        assert!(closed.contains('>'), "{closed}");
+        assert!(!closed.contains('▶'), "{closed}");
+        let open = render(Ladder::mono_ascii(), &[true]);
+        assert!(open.contains('v'), "{open}");
+        assert!(!open.contains('▼'), "{open}");
     }
 }
