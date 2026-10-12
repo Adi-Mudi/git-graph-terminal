@@ -274,10 +274,6 @@ pub enum Action {
     CdvFocusToggle,
     /// Switch the CDV file list between Tree and List — `v` (VIS-041/VIS-042).
     CdvToggleView,
-    /// Grow the CDV panel — `+` (the `cdvHeightResize` handle).
-    CdvResizeUp,
-    /// Shrink the CDV panel — `-`.
-    CdvResizeDown,
     /// Open the find widget — `Ctrl+F` (W6/T1).
     FindOpen,
     /// Close the find widget and drop the highlight — `Ctrl+F` again.
@@ -374,8 +370,6 @@ impl Action {
         Action::CdvClose,
         Action::CdvFocusToggle,
         Action::CdvToggleView,
-        Action::CdvResizeUp,
-        Action::CdvResizeDown,
         Action::FindOpen,
         Action::FindClose,
         Action::FindNext,
@@ -1353,8 +1347,6 @@ pub fn reduce(state: &mut AppState, action: Action, repo: &Path) -> Outcome {
                 cdv.toggle_view();
             }
         }
-        Action::CdvResizeUp => resize_cdv(state, 2),
-        Action::CdvResizeDown => resize_cdv(state, -2),
 
         // W6/T1 — the find widget.
         Action::FindOpen => {
@@ -1785,23 +1777,20 @@ fn close_cdv_for(state: &mut AppState, row: RowIdx) {
     }
 }
 
-/// Grow/shrink the docked panel (`cdvHeightResize`).
-fn resize_cdv(state: &mut AppState, delta: i32) {
-    if let Some(cdv) = state.cdv.as_mut() {
-        cdv.resize(delta);
-    }
-}
-
 /* ------------------------------------------------------------------ */
 /* W7/T3 — the CDV file-row cursor and the A65–A68 file actions        */
 /* ------------------------------------------------------------------ */
 
-/// The text rows the docked panel can show, for the cursor's scroll window.
+/// The text rows the inline panel can show, for the cursor's scroll window.
+///
+/// The panel is drawn inline under its commit row (T3), so its viewport is the
+/// height [`crate::cdv::inline_height`] gives it for the current body — minus the
+/// panel's two border rows.
 fn cdv_file_viewport(state: &AppState) -> u16 {
     state
         .cdv
         .as_ref()
-        .map(|cdv| cdv.height.saturating_sub(2))
+        .map(|cdv| crate::cdv::inline_height(cdv, state.status.height.max(1)).saturating_sub(2))
         .unwrap_or(0)
 }
 

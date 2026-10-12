@@ -257,7 +257,7 @@ nothing opens it, the row is `BACKLOG` and says so: `MenuSurface::FileRow` (A65�
 | ACT-107 | File View type: Tree / List | DONE | `v` → `Action::CdvToggleView`; test `vis_041_and_042_the_view_toggles_and_is_named` |
 | ACT-108 | Code Review (start / end) | NOT-PORTED | R4 code-review workspace state |
 | ACT-109 | Open External Directory Diff | BACKLOG | external diff tool launch not implemented (availability display only) |
-| ACT-110 | CDV divider drag / height resize | NOT-PORTED | R3 pointer-layout chrome; the terminal CDV is a fixed pane (`+`/`-` resize the row budget instead) |
+| ACT-110 | CDV divider drag / height resize | NOT-PORTED | R3 pointer-layout chrome; the terminal CDV has no resize handle — since W12/T3 it is an inline block under its commit row, sized per frame by `cdv::inline_height` (see `UD-001`) |
 | ACT-111 | Folder expand / collapse | DONE | `src/cdv.rs` tree toggles; test `closed_folders_hide_their_children` |
 
 ---
@@ -441,7 +441,7 @@ those rows say "no form field".
 | INT-043 | click (external-diff / provider affordance) | NOT-PORTED | R3/M3 chrome |
 | INT-044 | click (toolbar control) | BACKLOG | no toolbar; only key bindings exist |
 | INT-045 | drag column divider | NOT-PORTED | R3 pointer chrome; terminal columns are fixed-width (visibility is toggled instead) |
-| INT-046 | drag CDV height handle | NOT-PORTED | R3 pointer chrome; `+`/`-` resize the row budget instead |
+| INT-046 | drag CDV height handle | NOT-PORTED | R3 pointer chrome; the terminal CDV has no height handle — since W12/T3 it is an inline block whose height follows its content (see `UD-001`) |
 | INT-047 | drag CDV divider | NOT-PORTED | R3 pointer chrome |
 | INT-048 | click commit row (expand) | DESIGN-DIFFERENCE | `Enter` toggles; test `enter_toggles_the_selected_row_only` |
 | INT-049 | click same commit (collapse) | DESIGN-DIFFERENCE | `Enter` toggles; test `enter_toggles_the_selected_row_only` |
@@ -646,5 +646,19 @@ R6 negatives (DRIFT-003…008) — all already carry their ruling id in §1.
 | Q2 | For W10, is W10-B (12 rows for ~10 lines of `ClickTarget` + 4 key bindings) the right first wave, or is W10-A (the settings subsystem) worth more despite being larger? | the ledger's own numbers say W10-B is by far the cheapest way to move the `DONE` count, but W10-A is what unlocks §9.2 | **ANSWERED 2026-10-12 (W10)** — W10-B first, and it closed completely in `3eb6102` (8/8 rows, `DONE` 179→187). W10-A is still the next wave and is still the prerequisite for §9.2. The two `Link`-surface rows originally counted in W10-B were moved to W10-H during planning, as the revision note in §9.1 records |
 
 No open questions remain.
+
+---
+
+## 11. W12 design differences — `UD-001…` (deliberate changes)
+
+W12 **upgrades** the existing design rather than porting new reference surface, so these rows are not parity
+gaps. Each one is a deliberate change to shipped behaviour, recorded here so the ledger stays honest about
+what moved. `UD-` ids sit outside the 425-row population of §0.2 — they are additive, and no `ACT-`/`INT-`/
+`VIS-`/`SET-` row changes status because of them (where a row's *reason* text went stale it is corrected in
+place, and the row says so).
+
+| ID | Change | Status | Evidence / reason |
+|---|---|---|---|
+| UD-001 | `+` / `-` no longer resize the commit-details panel, and `CdvState::height`, `MIN_HEIGHT`, `MAX_HEIGHT`, `DEFAULT_HEIGHT`, `CdvState::resize` and `Action::CdvResizeUp`/`CdvResizeDown` are gone | DESIGN-DIFFERENCE | W12/T3 moved the panel from a docked bottom pane to an inline block under its commit row, so there is no docked height left to resize: the block is sized per frame by `cdv::inline_height` (`src/cdv.rs:700`) and reserved by `AppState::inline_cdv_height` (`src/app.rs:781`). The field was already write-only apart from one stale reader — `cdv_file_viewport` scrolled the file-row cursor against the hardcoded `DEFAULT_HEIGHT` of 14 rather than the real block height; it now asks `inline_height` for the same body. `cdvHeightResize` has no `ACT-` row in §3, so no parity row moves; the two rows that cited `+`/`-` as their justification (ACT-110, INT-046) keep `NOT-PORTED` and had their reason text corrected |
 
 <!-- LEDGER-END -->

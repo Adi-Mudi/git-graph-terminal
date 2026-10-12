@@ -35,8 +35,8 @@
 //!    variable-height row, which the ratatui `Table` cannot do; the terminal
 //!    port therefore docks the CDV to the bottom of the screen — a first-class
 //!    reference layout, chosen because it is the only one the widget set can
-//!    express. The panel is resizable ([`CdvState::resize`]) like the
-//!    reference's `cdvHeightResize` handle.
+//!    express. The inline block's height is derived from the body height by
+//!    [`inline_height`], so there is no separate docked panel to resize.
 //! 2. **`(Review)` markers are text.** The reference draws SVG eye/tick icons;
 //!    here they are short text badges.
 //! 3. **Signature shows as a badge + tooltip text.** `generateSignatureHtml`
@@ -54,12 +54,6 @@ use crate::term::ladder::Ladder;
 use crate::files::{self, FileRow, FileRowKind, FileTree, FileView, GitFileChange, GitFileStatus};
 use crate::layout::types::RowIdx;
 use crate::render::columns::long_date;
-
-/// The reference's `cdvHeightResize` bounds, in terminal rows.
-pub const MIN_HEIGHT: u16 = 6;
-pub const MAX_HEIGHT: u16 = 40;
-/// Height a freshly opened CDV gets.
-pub const DEFAULT_HEIGHT: u16 = 14;
 
 /// What the panel is showing (`web/main.ts:2536`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -123,9 +117,7 @@ pub struct CdvState {
     pub selected: usize,
     /// Scroll offset into the rendered lines.
     pub scroll: u16,
-    /// Panel height in terminal rows.
-    pub height: u16,
-    /// `commitDetailsView.autoCenter` — kept for parity; unused while docked.
+    /// `commitDetailsView.autoCenter` — kept for parity; unused while inline.
     pub auto_center: bool,
     /// Load error, shown in place of the summary.
     pub error: Option<String>,
@@ -150,7 +142,6 @@ impl CdvState {
             external_diff: None,
             selected: 0,
             scroll: 0,
-            height: DEFAULT_HEIGHT,
             auto_center: true,
             error: None,
         }
@@ -175,7 +166,6 @@ impl CdvState {
             external_diff: None,
             selected: 0,
             scroll: 0,
-            height: DEFAULT_HEIGHT,
             auto_center: true,
             error: None,
         }
@@ -200,7 +190,6 @@ impl CdvState {
             external_diff: None,
             selected: 0,
             scroll: 0,
-            height: DEFAULT_HEIGHT,
             auto_center: true,
             error: None,
         }
@@ -247,12 +236,6 @@ impl CdvState {
     /// Toggle Tree ↔ List (VIS-041 / VIS-042).
     pub fn toggle_view(&mut self) {
         self.view = self.view.toggle();
-    }
-
-    /// Resize the panel, clamped to the reference's bounds.
-    pub fn resize(&mut self, delta: i32) {
-        let height = self.height as i32 + delta;
-        self.height = height.clamp(MIN_HEIGHT as i32, MAX_HEIGHT as i32) as u16;
     }
 
     /// Is `path` a folder the user has collapsed?
@@ -1127,16 +1110,6 @@ mod tests {
         assert!(text.contains("lib.rs"), "{text}");
         state.toggle_view();
         assert!(text_of(&state.lines()).contains("src/lib.rs"));
-    }
-
-    #[test]
-    fn resizing_clamps_to_the_reference_bounds() {
-        let mut state = loaded_commit(0, detail(), vec![]);
-        assert_eq!(state.height, DEFAULT_HEIGHT);
-        state.resize(100);
-        assert_eq!(state.height, MAX_HEIGHT);
-        state.resize(-100);
-        assert_eq!(state.height, MIN_HEIGHT);
     }
 
     #[test]

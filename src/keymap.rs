@@ -36,7 +36,6 @@
 //! | `d` | open CDV | click a commit |
 //! | `Tab` | focus the CDV | — |
 //! | `v` | Tree/List file view | `#cdvFileViewTypeTree` / `#cdvFileViewTypeList` |
-//! | `+` / `-` | resize the CDV | `.cdvHeightResize` |
 //! | `Ctrl+W` | close the CDV | `#cdvClose` |
 //!
 //! `Alt`-modified keys were reserved and unbound in W4/W5; W6 claims exactly
@@ -265,8 +264,6 @@ pub fn action_for(key: KeyEvent) -> Option<Action> {
         KeyCode::Tab => Some(Action::TabToggle),
         KeyCode::BackTab => Some(Action::CdvFocusToggle),
         KeyCode::Char('v') if !ctrl => Some(Action::CdvToggleView),
-        KeyCode::Char('+') | KeyCode::Char('=') => Some(Action::CdvResizeUp),
-        KeyCode::Char('-') | KeyCode::Char('_') => Some(Action::CdvResizeDown),
 
         // M4-W12/T1 — the tab bar.
         KeyCode::Char('1') => Some(Action::TabOverview),
@@ -849,14 +846,6 @@ mod tests {
             "#cdvFileViewTypeTree / #cdvFileViewTypeList"
         );
         assert_eq!(
-            action_for(key(KeyCode::Char('+'))),
-            Some(Action::CdvResizeUp)
-        );
-        assert_eq!(
-            action_for(key(KeyCode::Char('-'))),
-            Some(Action::CdvResizeDown)
-        );
-        assert_eq!(
             action_for(modified(KeyCode::Char('w'), KeyModifiers::CONTROL)),
             Some(Action::CdvClose),
             "#cdvClose"
@@ -935,8 +924,6 @@ mod tests {
             ),
             CdvFocusToggle => (Route::Global, key(KeyCode::BackTab)),
             CdvToggleView => (Route::Global, key(KeyCode::Char('v'))),
-            CdvResizeUp => (Route::Global, key(KeyCode::Char('+'))),
-            CdvResizeDown => (Route::Global, key(KeyCode::Char('-'))),
             FindOpen => (
                 Route::Global,
                 modified(KeyCode::Char('f'), KeyModifiers::CONTROL),
