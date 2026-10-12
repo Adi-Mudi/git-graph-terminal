@@ -71,8 +71,23 @@ $ git-graph-terminal --version
 git-graph-terminal 0.3.0 (0d52cc4)
 ```
 
-(The hash is the revision at build time; it becomes the W11 commit hash once this
-branch is committed and rebuilt.)
+### Flag — worktree hash staleness (found in verification, fixed)
+
+The first cut watched `rerun-if-changed=.git`. In a git **worktree** `.git` is a
+*file* (a `gitdir:` pointer), and a commit writes to the real git directory —
+never to that file — so Cargo never reran the script and `--version` kept
+reporting the base commit `0d52cc4` after building from the branch.
+
+`build.rs` now watches the two files that actually move on commit, resolved
+through git so both a normal checkout and a worktree are covered:
+
+- `<absolute-git-dir>/HEAD` (checkout)
+- `<git-common-dir>/<symbolic-ref HEAD>` (commit), e.g. `…/.git/refs/heads/ggt-m3-w11`
+
+`--path-format=absolute` (git 2.31+) is used for the common dir, with a
+`CARGO_MANIFEST_DIR`-relative fallback for older git. After the fix, a rebuild
+reports the branch HEAD, and committing `build.rs` itself re-stamps to the new
+commit — which is the live proof the watch works.
 
 ## Phase 4 — T4: CI: DONE
 
@@ -118,6 +133,7 @@ Each plan item read back and checked against the sources; every `TO` present and
 | T2 `README.md` KEYBINDINGS markers + table present, matches generator | PASS |
 | T3 `Cargo.toml` `version = "0.3.0"`; `0.1.0` FROM gone | PASS |
 | T3 `build.rs`, `src/version.rs`, `mod version;`, `--version` arm present | PASS |
+| T3 worktree fix: `watch_git_metadata` + `git_common_dir` present; `rerun-if-changed=.git` FROM gone | PASS |
 | T4 `ci.yml` `--all-targets` clippy + `pty-e2e` matrix present | PASS |
 
 ## Notes / deviations
