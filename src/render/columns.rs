@@ -8,7 +8,7 @@
 
 use ratatui::layout::Alignment;
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::Line;
+use ratatui::text::{Line, Span};
 use ratatui::widgets::{Cell as TuiCell, Row as TuiRow, Table};
 
 use crate::app::ColumnState;
@@ -27,10 +27,16 @@ pub fn text_offset(max_lane: Lane) -> u16 {
 /// else is toggled from the column-header menu for W5/T3.
 pub const FIXED_HEADERS: [&str; 2] = ["idx", "hash"];
 
+/// The label of the trailing caret column.
+///
+/// The mockup puts a `▼` / `▶` at the end of every commit row and gives it no
+/// header text, so the label is empty.
+pub const CARET_HEADER: &str = "";
+
 /// The header labels for the current [`ColumnState`].
 ///
 /// Always `idx` and `hash`; `date`, `author` and `subject` only when the
-/// corresponding column is visible.
+/// corresponding column is visible; and [`CARET_HEADER`] last.
 ///
 /// There is no `refs` column (T7): each commit's refs are drawn on their own
 /// line above it, so a column would print them twice.
@@ -45,6 +51,7 @@ pub fn headers(columns: &ColumnState) -> Vec<&'static str> {
     if columns.commit {
         out.push("subject");
     }
+    out.push(CARET_HEADER);
     out
 }
 
@@ -61,6 +68,7 @@ pub fn constraints(columns: &ColumnState) -> Vec<ratatui::layout::Constraint> {
     if columns.commit {
         out.push(Min(12));
     }
+    out.push(Length(2));
     out
 }
 
@@ -104,6 +112,9 @@ pub struct TableWindow<'a> {
     /// The rows the inline uncommitted section claims above the first commit
     /// (T4).
     pub leading: u16,
+    /// Which rows are expanded, indexed by row. The trailing caret column shows
+    /// `▼` for an expanded row and `▶` otherwise. A missing entry is `false`.
+    pub expanded: &'a [bool],
 }
 
 /// Build the commit table for a **display-row window**.
@@ -131,6 +142,7 @@ pub fn commits_table_window(
         refs,
         visible,
         leading,
+        expanded,
     } = window;
     let mut body: Vec<TuiRow<'static>> = Vec::new();
     let scroll = scroll as u32;
@@ -164,7 +176,14 @@ pub fn commits_table_window(
             body.push(spacer_row());
         }
         if commit_at >= scroll {
-            body.push(commit_row(i as usize, commit, selected, columns, find));
+            body.push(commit_row(
+                i as usize,
+                commit,
+                selected,
+                expanded.get(i as usize).copied().unwrap_or(false),
+                columns,
+                find,
+            ));
         }
         for _ in (commit_at + 1).max(scroll)..cursor {
             body.push(spacer_row());
@@ -177,10 +196,14 @@ pub fn commits_table_window(
 }
 
 /// One commit body row (absolute index `idx`).
+///
+/// `expanded` drives the trailing caret column: the mockup ends every commit
+/// row with `▼` when its details are open and `▶` when they are closed.
 fn commit_row(
     idx: usize,
     commit: &Commit,
     selected: Option<usize>,
+    expanded: bool,
     columns: &ColumnState,
     find: Option<&FindWidget>,
 ) -> TuiRow<'static> {
@@ -216,6 +239,10 @@ fn commit_row(
     if columns.commit {
         cells.push(TuiCell::from(highlighted(&commit.subject, row_tint, find)));
     }
+    cells.push(TuiCell::from(Span::styled(
+        if expanded { "▼" } else { "▶" },
+        dim,
+    )));
     let mut row = TuiRow::new(cells);
     if row_tint != Style::default() {
         row = row.style(row_tint);
@@ -310,10 +337,11 @@ mod tests {
     #[test]
     fn header_names_every_visible_column() {
         let headers = headers(&ColumnState::default());
-        assert_eq!(headers.len(), 5, "idx, hash, date, author, subject");
+        assert_eq!(headers.len(), 6, "idx, hash, date, author, subject, caret");
         assert_eq!(headers[0], FIXED_HEADERS[0]);
         assert_eq!(headers[1], FIXED_HEADERS[1]);
         assert_eq!(headers[4], "subject");
+        assert_eq!(headers[5], CARET_HEADER);
         // T7: refs have their own line above the commit, never a column.
         assert!(!headers.contains(&"refs"));
     }
@@ -325,11 +353,11 @@ mod tests {
             author: false,
             ..Default::default()
         };
-        assert_eq!(headers(&columns), vec!["idx", "hash", "subject"]);
-        assert_eq!(constraints(&columns).len(), 3);
+        assert_eq!(headers(&columns), vec!["idx", "hash", "subject", ""]);
+        assert_eq!(constraints(&columns).len(), 4);
         columns.commit = false;
-        assert_eq!(headers(&columns), vec!["idx", "hash"]);
-        assert_eq!(constraints(&columns).len(), 2);
+        assert_eq!(headers(&columns), vec!["idx", "hash", ""]);
+        assert_eq!(constraints(&columns).len(), 3);
     }
 
     /// A `heights` slice of `n` rows, all `1` except `expanded` (given `1 + extra`).
@@ -362,6 +390,7 @@ mod tests {
             refs,
             visible,
             leading,
+            expanded: &[],
         }
     }
 

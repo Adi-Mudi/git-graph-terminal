@@ -140,9 +140,16 @@ impl UncommittedState {
         })
     }
 
-    /// The header line: `Uncommitted Changes (N)`.
-    pub fn title(&self) -> String {
-        format!("Uncommitted Changes ({})", self.len())
+    /// The header line: `▼ Uncommitted Changes (N)  — working directory vs HEAD`.
+    ///
+    /// `open` is the section's disclosure state, so the caret shows whether `u`
+    /// has the file rows showing (mockup v3, Q2).
+    pub fn title(&self, open: bool) -> String {
+        format!(
+            "{} Uncommitted Changes ({})  — working directory vs HEAD",
+            if open { '▼' } else { '▶' },
+            self.len()
+        )
     }
 
     /// The summary line under the header.
@@ -387,7 +394,14 @@ mod tests {
                 },
             ],
         };
-        assert_eq!(state.title(), "Uncommitted Changes (3)");
+        assert_eq!(
+            state.title(true),
+            "▼ Uncommitted Changes (3)  — working directory vs HEAD"
+        );
+        assert_eq!(
+            state.title(false),
+            "▶ Uncommitted Changes (3)  — working directory vs HEAD"
+        );
         assert_eq!(state.counts(), [1, 1, 1, 0]);
         assert_eq!(state.staged_count(), 1);
         assert_eq!(state.unstaged_count(), 3);
@@ -402,7 +416,10 @@ mod tests {
     fn an_empty_section_is_empty() {
         let state = UncommittedState::default();
         assert!(state.is_empty());
-        assert_eq!(state.title(), "Uncommitted Changes (0)");
+        assert_eq!(
+            state.title(true),
+            "▼ Uncommitted Changes (0)  — working directory vs HEAD"
+        );
         assert_eq!(state.totals(), (0, 0));
     }
 }

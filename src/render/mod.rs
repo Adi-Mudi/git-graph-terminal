@@ -198,7 +198,7 @@ fn inline_blocks(state: &AppState, width: u16) -> Vec<InlineBlock<'_>> {
     // T4 — the uncommitted section sits above the first commit.
     if state.tab == Tab::Overview && !state.uncommitted.is_empty() {
         let mut lines = vec![Line::styled(
-            format!(" {} ", state.uncommitted.title()),
+            format!(" {} ", state.uncommitted.title(state.uncommitted_open)),
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
@@ -208,9 +208,12 @@ fn inline_blocks(state: &AppState, width: u16) -> Vec<InlineBlock<'_>> {
             Style::default().fg(Color::DarkGray),
         ));
         if state.uncommitted_open {
+            let total = state.uncommitted.files.len();
             for (index, file) in state.uncommitted.files.iter().enumerate() {
                 lines.push(uncommitted_file_line(
                     file,
+                    index,
+                    total,
                     state.uncommitted_selected == Some(index),
                 ));
             }
@@ -235,12 +238,12 @@ fn inline_blocks(state: &AppState, width: u16) -> Vec<InlineBlock<'_>> {
             let refs = state
                 .rows
                 .get(row as usize)
-                .map(|commit| commit.refs.join(", "))
+                .map(|commit| commit.refs.join(" · "))
                 .unwrap_or_default();
             blocks.push(InlineBlock {
                 top,
                 lines: vec![Line::styled(
-                    format!("  ({refs})"),
+                    format!("┌ refs │ {refs}"),
                     Style::default().fg(Color::Cyan),
                 )],
                 kind: BlockKind::Plain,
@@ -301,8 +304,30 @@ fn inline_blocks(state: &AppState, width: u16) -> Vec<InlineBlock<'_>> {
 }
 
 /// One uncommitted file row: badge, path, counts, stage label (T4).
+/// The tree glyph that opens an uncommitted file row (`┌─`, `├─`, `└─`).
+///
+/// The mockup hand-writes one glyph per row: `┌─` on the first, `└─` on the
+/// last, `├─` in between. A one-file section is both first and last, so it gets
+/// `└─`.
+fn tree_glyph(index: usize, total: usize) -> &'static str {
+    if total <= 1 || index + 1 >= total {
+        "└─"
+    } else if index == 0 {
+        "┌─"
+    } else {
+        "├─"
+    }
+}
+
+/// One uncommitted file row: `  ┌─ A src/main.ts  staged  +12 −0`.
+///
+/// The mockup's order is tree glyph, status letter, path, then the staging
+/// marker and the counts. The counts are printed even when both are `0` — the
+/// mockup prints `+0 −0` rather than dropping the field.
 fn uncommitted_file_line(
     file: &crate::uncommitted::UncommittedFile,
+    index: usize,
+    total: usize,
     selected: bool,
 ) -> Line<'static> {
     let mut style = Style::default();
@@ -316,22 +341,17 @@ fn uncommitted_file_line(
         crate::files::GitFileStatus::Renamed => Color::Cyan,
         crate::files::GitFileStatus::Untracked => Color::Magenta,
     };
-    let stage = file.stage_label();
-    let mut spans = vec![
-        Span::styled(format!("  {} ", file.letter()), Style::default().fg(letter)),
+    let dim = Style::default().fg(Color::DarkGray);
+    Line::from(vec![
+        Span::styled(format!("  {} ", tree_glyph(index, total)), dim),
+        Span::styled(format!("{} ", file.letter()), Style::default().fg(letter)),
         Span::styled(file.path.clone(), style),
-    ];
-    if file.additions > 0 || file.deletions > 0 {
-        spans.push(Span::styled(
+        Span::styled(format!("  {}", file.stage_label()), dim),
+        Span::styled(
             format!("  +{} \u{2212}{}", file.additions, file.deletions),
-            Style::default().fg(Color::DarkGray),
-        ));
-    }
-    spans.push(Span::styled(
-        format!("  [{stage}]"),
-        Style::default().fg(Color::DarkGray),
-    ));
-    Line::from(spans)
+            dim,
+        ),
+    ])
 }
 
 /// Turn parsed diff lines into renderable lines.
@@ -970,6 +990,9 @@ fn graph_view(
         .collect();
     let visible = state.visible_rows();
     let leading = state.uncommitted_height();
+    let expanded: Vec<bool> = (0..state.rows.len() as RowIdx)
+        .map(|row| state.expanded.contains(&row))
+        .collect();
 
     frame.render_widget(
         GraphWidget {
@@ -994,6 +1017,7 @@ fn graph_view(
                 refs: &refs,
                 visible: &visible,
                 leading,
+                expanded: &expanded,
             },
             state.scroll,
             selected.map(|row| row as usize),
@@ -1260,6 +1284,19 @@ mod tests {
     fn screen(state: &AppState, width: u16, height: u16) -> Vec<String> {
         use ratatui::backend::TestBackend;
         use ratatui::Terminal;
+        // The real loop refreshes `status.width`/`status.height` from the
+        // terminal before every draw (`main.rs`), and the two disagreeing
+        // readers of the panel height are `AppState::inline_cdv_height` (from
+        // `status.height`) and `cdv_rect` (from the body rect). Drawing a frame
+        // without refreshing the viewport therefore reserves one panel height
+        // and paints another, and the panel and its diff overlap. Mirror the
+        // loop: the body is the frame minus the tab bar, the table header and
+        // the status bar.
+        const CHROME: u16 = 3;
+        let mut state = state.clone();
+        state.status.width = width;
+        state.status.height = height.saturating_sub(CHROME);
+        let state = &state;
         let view = ViewOptions {
             graph: Some(&state.layout),
             // `make_view` marks the mock fixture's first row as the
@@ -1319,6 +1356,10 @@ mod tests {
 
         let (refs_at, refs_line) = line_with(&rows, "HEAD -> main");
         assert!(
+            refs_line.contains("┌ refs │ HEAD -> main"),
+            "the refs line must carry the mockup's label: {refs_line:?}"
+        );
+        assert!(
             !refs_line.contains("a1b2c3d"),
             "the refs line must not carry the commit itself: {refs_line:?}"
         );
@@ -1335,6 +1376,166 @@ mod tests {
         );
     }
 
+    /// Q2 — an uncommitted file row reads `┌─ M src/render/ui.rs  staged  +42 −8`:
+    /// the mockup's order is tree glyph, status letter, path, staging marker,
+    /// then the counts.
+    #[test]
+    fn an_uncommitted_file_row_reads_tree_letter_path_stage_counts() {
+        let state = AppState::demo();
+        let rows = screen(&state, 120, 30);
+
+        let (_, row) = line_with(&rows, "src/render/ui.rs");
+        assert!(
+            row.contains("┌─ M src/render/ui.rs"),
+            "the first file row opens the tree and leads with the letter: {row:?}"
+        );
+        let stage = row.find("staged").expect("a staging marker");
+        let counts = row.find('+').expect("an additions count");
+        assert!(
+            stage < counts,
+            "the staging marker comes before the counts: {row:?}"
+        );
+        assert!(
+            !row.contains('['),
+            "the staging marker is no longer bracketed: {row:?}"
+        );
+
+        // The last row closes the tree instead of continuing it.
+        let (_, last) = line_with(&rows, "src/legacy/panel.rs");
+        assert!(
+            last.contains("└─ D src/legacy/panel.rs"),
+            "the last file row closes the tree: {last:?}"
+        );
+    }
+
+    /// Q1 — the mockup ends every commit row with a caret: `▼` when the row's
+    /// details are open, `▶` when they are closed.
+    #[test]
+    fn the_commit_row_ends_with_an_expansion_caret() {
+        let mut state = AppState::demo();
+        let row = head_row(&state);
+
+        let closed = screen(&state, 120, 24);
+        let (at, _) = line_with(&closed, "Add graph renderer widget");
+        assert!(
+            closed[at].trim_end().ends_with('▶'),
+            "a closed row ends with the collapsed caret: {:?}",
+            closed[at]
+        );
+
+        state.expanded.insert(row);
+        let open = screen(&state, 120, 30);
+        let (at, _) = line_with(&open, "Add graph renderer widget");
+        assert!(
+            open[at].trim_end().ends_with('▼'),
+            "an open row ends with the expanded caret: {:?}",
+            open[at]
+        );
+    }
+
+    /// T8 — the evidence gallery: print one full frame per W12 surface so the
+    /// wave report can quote real screens instead of describing them.
+    ///
+    /// Ignored by default (it only prints), so it costs CI nothing. Run it with
+    /// `cargo test --bin git-graph-terminal w12_evidence_gallery -- --ignored --nocapture`
+    /// and paste the frames into `.IDE_Plans/w12-report.md`.
+    #[test]
+    #[ignore = "prints frames for the wave report; run with --ignored --nocapture"]
+    fn w12_evidence_gallery() {
+        fn frame(label: &str, state: &AppState) {
+            println!("\n===== {label} =====\n");
+            for line in screen(state, 120, 40) {
+                println!("{line}");
+            }
+        }
+
+        let overview = AppState::demo();
+        frame("Overview (key 1) — default", &overview);
+
+        let mut branches = AppState::demo();
+        branches.tab = Tab::Branches;
+        frame("Branches (key 2) — all branches", &branches);
+
+        let mut filtered = AppState::demo();
+        filtered.tab = Tab::Branches;
+        filtered.branch_filter = Some("refs/heads/feature/graph".to_string());
+        // `branch_filter` is only the label; `branch_reachable` is the set
+        // `visible_rows` filters on, so the gallery has to set both.
+        let reachable = filtered
+            .rows
+            .iter()
+            .take(4)
+            .map(|commit| commit.hash.clone())
+            .collect();
+        filtered.branch_reachable = Some(reachable);
+        frame("Branches (key 2) — feature/graph filtered", &filtered);
+
+        let mut closed = AppState::demo();
+        closed.uncommitted_open = false;
+        frame("Overview — `u` collapsed the uncommitted section", &closed);
+
+        let mut expanded = AppState::demo();
+        let row = head_row(&expanded);
+        expanded.expanded.insert(row);
+        expanded.cdv = Some(CdvState::loading(row, "a1b2c3d", CdvKind::Commit, None));
+        frame(
+            "Overview — Enter expanded the HEAD row (loading)",
+            &expanded,
+        );
+
+        // The same row with the panel loaded and one file's diff open — the two
+        // surfaces the mockup's Q1 is really about.
+        let change = |status, path: &str, adds: u32, dels: u32| crate::files::GitFileChange {
+            old_path: path.to_string(),
+            new_path: path.to_string(),
+            status,
+            additions: Some(adds),
+            deletions: Some(dels),
+            submodule: false,
+        };
+        let mut loaded = AppState::demo();
+        let row = head_row(&loaded);
+        loaded.expanded.insert(row);
+        let mut cdv = CdvState::loading(row, "a1b2c3d", CdvKind::Commit, None);
+        cdv.loaded(
+            crate::files::CommitDetail {
+                hash: "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0".to_string(),
+                parents: vec!["9f8e7d6".to_string()],
+                author: "Ada Lovelace".to_string(),
+                author_email: "ada@example.invalid".to_string(),
+                author_date: 1_700_000_000,
+                committer: "Ada Lovelace".to_string(),
+                committer_email: "ada@example.invalid".to_string(),
+                committer_date: 1_700_000_000,
+                signature_status: ' ',
+                signature_signer: String::new(),
+                signature_key: String::new(),
+                body: "Add graph renderer widget\n\nThe lane router draws rounded corners."
+                    .to_string(),
+            },
+            vec![
+                change(crate::files::GitFileStatus::Modified, "src/lib.rs", 12, 3),
+                change(crate::files::GitFileStatus::Added, "src/graph.rs", 48, 0),
+            ],
+        );
+        // `app::open_cdv` hands the panel its commit's decorations; the gallery
+        // mirrors that so `Branch:` / `Tags:` show the real values.
+        cdv.refs = loaded.rows[row as usize].refs.clone();
+        loaded.cdv = Some(cdv);
+        loaded.inline_diff = Some(InlineDiff {
+            title: "git show a1b2c3d -- src/lib.rs".to_string(),
+            lines: crate::diff::parse("@@ -1,2 +1,3 @@\n one\n+two\n"),
+            source: DiffSource::CommitFile {
+                row,
+                path: "src/lib.rs".to_string(),
+            },
+        });
+        frame(
+            "Overview — Enter expanded the HEAD row (loaded, one file diff open)",
+            &loaded,
+        );
+    }
+
     /// T4 — the uncommitted section is the first thing in the Overview body: a
     /// header with the count, a summary line, then one row per file, all above
     /// the history.
@@ -1343,7 +1544,7 @@ mod tests {
         let state = AppState::demo();
         let rows = screen(&state, 120, 30);
 
-        let (header_at, _header) = line_with(&rows, &state.uncommitted.title());
+        let (header_at, _header) = line_with(&rows, &state.uncommitted.title(true));
         let summary = &rows[header_at + 1];
         assert!(
             summary.contains("staged") && summary.contains("unstaged"),
@@ -1379,8 +1580,100 @@ mod tests {
         let (commit_at, _) = line_with(&rows, "Add graph renderer widget");
         let panel = &rows[commit_at + 1];
         assert!(
-            panel.contains("cdv: Commit Details"),
+            panel.contains("├─ Commit Details"),
             "the panel must open under its commit row, got {panel:?}"
+        );
+        // The mockup's own lead text, not the `--dump` status line.
+        assert!(
+            panel.contains("— loading…"),
+            "a loading panel says so in the title, got {panel:?}"
+        );
+    }
+
+    /// A loaded commit panel on the HEAD row, with two changed files.
+    fn loaded_details_panel() -> AppState {
+        let mut state = AppState::demo();
+        let row = head_row(&state);
+        state.expanded.insert(row);
+        let change = |status, path: &str, adds: u32, dels: u32| crate::files::GitFileChange {
+            old_path: path.to_string(),
+            new_path: path.to_string(),
+            status,
+            additions: Some(adds),
+            deletions: Some(dels),
+            submodule: false,
+        };
+        let mut cdv = CdvState::loading(row, "a1b2c3d", CdvKind::Commit, None);
+        cdv.loaded(
+            crate::files::CommitDetail {
+                hash: "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0".to_string(),
+                parents: vec!["9f8e7d6".to_string()],
+                author: "Ada Lovelace".to_string(),
+                author_email: "ada@example.invalid".to_string(),
+                author_date: 1_700_000_000,
+                committer: "Ada Lovelace".to_string(),
+                committer_email: "ada@example.invalid".to_string(),
+                committer_date: 1_700_000_000,
+                signature_status: ' ',
+                signature_signer: String::new(),
+                signature_key: String::new(),
+                body: "Add graph renderer widget\n\nThe lane router draws rounded corners."
+                    .to_string(),
+            },
+            vec![
+                change(crate::files::GitFileStatus::Modified, "src/lib.rs", 12, 3),
+                change(crate::files::GitFileStatus::Added, "src/graph.rs", 48, 0),
+            ],
+        );
+        cdv.refs = vec!["HEAD -> main".to_string(), "tag: v1".to_string()];
+        state.cdv = Some(cdv);
+        state
+    }
+
+    /// T3 — mockup v3's `.pane{grid-template-columns:1fr 1fr}`: the commit
+    /// information and the modified-file list paint on the **same** line, side
+    /// by side, instead of one above the other.
+    #[test]
+    fn the_details_pane_paints_as_two_columns() {
+        let state = loaded_details_panel();
+        let rows = screen(&state, 160, 40);
+        let (commit_at, _) = line_with(&rows, "Add graph renderer widget");
+
+        // Row +1 is the block's top border carrying the title; the content
+        // starts on row +2, where both columns begin.
+        let first = &rows[commit_at + 2];
+        assert!(
+            first.contains("Commit: a1b2c3d"),
+            "the left column starts the panel: {first:?}"
+        );
+        assert!(
+            first.contains("Files (2) — Tree View"),
+            "the right column shares the line: {first:?}"
+        );
+        assert!(
+            first.find("Commit: a1b2c3d") < first.find("Files (2)"),
+            "commit information is the left column: {first:?}"
+        );
+
+        // The mockup's new rows land in the left column, below `Commit:`.
+        let second = &rows[commit_at + 3];
+        assert!(second.contains("Parents:"), "{second:?}");
+    }
+
+    /// T3 — the mockup's `.totals` and diff-summary sentence close the right
+    /// column.
+    #[test]
+    fn the_details_pane_totals_close_the_right_column() {
+        let state = loaded_details_panel();
+        let rows = screen(&state, 160, 40);
+
+        line_with(
+            &rows,
+            "Total files changed: 2 · additions: +60 · deletions: −3",
+        );
+        line_with(
+            &rows,
+            "Diff summary: 2 files changed, 60 insertions(+), 3 deletions(−)",
         );
     }
 
@@ -1407,6 +1700,21 @@ mod tests {
         assert!(
             diff_at > commit_at,
             "the diff belongs below its commit row: commit {commit_at}, diff {diff_at}"
+        );
+        // …and below the panel's *body*, not over it. The panel is sized from
+        // `status.height` while the rect comes from the body height, so a draw
+        // that skips the per-frame viewport refresh reserves one height and
+        // paints another — this assertion is what catches that.
+        let (panel_at, _) = line_with(&rows, "├─ Commit Details");
+        let bottom = rows[panel_at..diff_at]
+            .iter()
+            .rposition(|line| line.contains('└'))
+            .map(|offset| panel_at + offset)
+            .expect("the panel's bottom border");
+        assert!(
+            bottom < diff_at,
+            "the diff must clear the panel's bottom border (row {bottom}), not overwrite\n{}",
+            rows.join("\n")
         );
         assert!(
             rows.iter().any(|line| line.contains("two")),
