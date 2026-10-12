@@ -87,7 +87,7 @@ while `ACT-008 Fetch` is `BACKLOG` (no key or menu row binds it). The 11 `PlanKi
 | DSP-013 | `CreateArchive` | NOT-PORTED | `PlanKind::OutOfScope` — R3 VS Code save-dialog chrome |
 | DSP-014 | `CreateBranch` | DONE | `branch [-f] <name> <hash>` / `checkout -b`; test `create_branch_and_remote_argv` |
 | DSP-015 | `CreatePullRequest` | NOT-PORTED | `OutOfScope` — R3 hosted-provider web UI |
-| DSP-016 | `DeleteBranch` | DONE | `branch -d|-D <name>`; test `destructive_ops_build_real_argv_but_are_gated` |
+| DSP-016 | `DeleteBranch` | DONE | `branch -d\|-D <name>`; test `destructive_ops_build_real_argv_but_are_gated` |
 | DSP-017 | `DeleteRemote` | DONE | `remote remove <name>`; test `dsp_table_matches_the_inventory` (entry point → ACT-077) |
 | DSP-018 | `DeleteRemoteBranch` | DONE | `push <r> --delete <b>`; test `dsp_table_matches_the_inventory` |
 | DSP-019 | `DeleteTag` | DONE | `tag -d <name>`; test `dsp_table_matches_the_inventory` |
