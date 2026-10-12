@@ -23,8 +23,9 @@
 //!   exactly like `#findWidget` (`web/styles/findWidget.css:1-5`: `position:
 //!   fixed; top: 0; right: 28px`). It also tints the matched characters of every
 //!   visible cell ([`highlighted`]) and the current match's row.
-//! * [`crate::cdv::draw`] — the commit details view, docked to the **bottom**
-//!   (`#cdv.docked`, `web/styles/main.css:309-320`).
+//! * [`crate::cdv::draw`] — the commit details view, drawn inline under its own
+//!   commit row (`#cdv.inline`, `web/styles/main.css:299-302`) rather than
+//!   docked.
 //! * [`dialog_popup`] — the modal confirmation dialog, centred
 //!   (`.dialog`, `web/styles/dialog.css:1-16`).
 //!

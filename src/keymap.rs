@@ -279,7 +279,7 @@ pub fn action_for(key: KeyEvent) -> Option<Action> {
         // both from the table (the virtual uncommitted row, and `compareWithHash`
         // set from the commit menu), so a terminal needs keys for them.
         // M4-W12/T4: plain `u` now jumps into the inline uncommitted section;
-        // `Shift+U` keeps the older docked uncommitted panel reachable.
+        // `Shift+U` keeps the older full-panel uncommitted CDV reachable.
         KeyCode::Char('u') if !shift => Some(Action::UncommittedToggle),
         KeyCode::Char('U') => Some(Action::CdvOpenUncommitted),
         KeyCode::Char('c') => Some(Action::CompareMark),

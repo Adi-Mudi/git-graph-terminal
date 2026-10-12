@@ -1813,7 +1813,7 @@ fn cdv_set_folder(state: &mut AppState, open: bool) {
     }
 }
 
-/// Toggle a folder row in the docked CDV by path (INT-050, W10).
+/// Toggle a folder row in the inline CDV by path (INT-050, W10).
 ///
 /// The reference binds a click on `.fileTreeFolder` to the same open/closed flip
 /// `Left`/`Right` perform on the cursor (`web/main.ts:2968-2978`). Unlike a file
@@ -3208,7 +3208,7 @@ mod tests {
     }
 
     #[test]
-    fn surface_at_reads_the_docked_cdv_as_file_rows() {
+    fn surface_at_reads_the_inline_cdv_as_file_rows() {
         let (state, hit) = cdv_geometry(&["src/lib.rs", "src/app.rs"]);
         let rows = state.cdv.as_ref().unwrap().file_rows();
         let folder = rows

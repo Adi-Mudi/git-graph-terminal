@@ -29,14 +29,16 @@
 //!
 //! ## Deliberate deviations
 //!
-//! 1. **Docked, not inline.** The reference defaults to
-//!    `commitDetailsView.location = Inline` (`src/config.ts:72-74`) and also
-//!    supports `Docked to Bottom`. An inline panel needs the table to grow a
-//!    variable-height row, which the ratatui `Table` cannot do; the terminal
-//!    port therefore docks the CDV to the bottom of the screen — a first-class
-//!    reference layout, chosen because it is the only one the widget set can
-//!    express. The inline block's height is derived from the body height by
-//!    [`inline_height`], so there is no separate docked panel to resize.
+//! 1. **Inline, under the commit row — the reference default.** The reference
+//!    defaults to `commitDetailsView.location = Inline` (`src/config.ts:72-74`)
+//!    and also supports `Docked to Bottom`. W12/T3 replaced the terminal's
+//!    docked bottom pane with the reference's default layout: the panel is a
+//!    block directly under its own commit row (`#cdv.inline`,
+//!    `web/styles/main.css:299-302`). A ratatui `Table` cannot grow a
+//!    variable-height row, so the table reserves the block's display rows and
+//!    [`crate::render`] paints over them — [`inline_height`] decides the height
+//!    and [`crate::app::AppState::block_parts`] makes the reservation. `Docked to
+//!    Bottom` is the layout that is not ported.
 //! 2. **`(Review)` markers are text.** The reference draws SVG eye/tick icons;
 //!    here they are short text badges.
 //! 3. **Signature shows as a badge + tooltip text.** `generateSignatureHtml`
@@ -703,7 +705,7 @@ pub fn inline_height(state: &CdvState, body_height: u16) -> u16 {
     content.min(cap).max(1)
 }
 
-/// Draw the panel (docked to the bottom of `area`).
+/// Draw the panel into `area` — the rect its commit row reserved for it.
 ///
 /// The frame follows the ladder, so an ASCII-only terminal gets `+-|`.
 pub fn draw(frame: &mut Frame, area: Rect, state: &CdvState, focused: bool, ladder: Ladder) {

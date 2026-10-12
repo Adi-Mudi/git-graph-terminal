@@ -279,10 +279,10 @@ those rows say "no form field".
 
 | ID | Setting (default) | Status | Evidence / reason |
 |---|---|---|---|
-| SET-001 | `commitDetailsView.autoCenter` = `true` | DESIGN-DIFFERENCE | the CDV is a fixed docked pane, not a scroll-centred webview |
+| SET-001 | `commitDetailsView.autoCenter` = `true` | DESIGN-DIFFERENCE | the CDV is an inline block under its commit row, not a scroll-centred webview (W12/T3, `UD-001`) |
 | SET-002 | `commitDetailsView.fileView.fileTree.compactFolders` = `true` | DESIGN-DIFFERENCE | default on — single-child chains collapse; test `a_single_child_folder_chain_collapses` |
 | SET-003 | `commitDetailsView.fileView.type` = `"File Tree"` | DESIGN-DIFFERENCE | default Tree; `v` toggles; test `vis_041_and_042_the_view_toggles_and_is_named` |
-| SET-004 | `commitDetailsView.location` = `"Inline"` | DESIGN-DIFFERENCE | the terminal CDV is a docked pane, never inline |
+| SET-004 | `commitDetailsView.location` = `"Inline"` | DESIGN-DIFFERENCE | the terminal always renders the CDV inline (W12/T3) and has no settings surface, so there is nothing for this setting to switch — the reference's `Docked to Bottom` alternative is not ported |
 | SET-005 | `contextMenuActionsVisibility` = `{}` | NOT-PORTED | no per-row context-menu visibility config |
 | SET-006 | `customBranchGlobPatterns` = `[]` | NOT-PORTED | no branches dropdown to hold glob patterns |
 | SET-007 | `customEmojiShortcodeMappings` = `[]` | NOT-PORTED | R3 emoji mappings are M3; not built |
@@ -424,7 +424,7 @@ those rows say "no form field".
 | INT-026 | right click (commit row) | DONE | test `surface_at_routes_rows_refs_and_empty_space` |
 | INT-027 | right click (ref label) | DONE | test `surface_for_refs_prefers_branch_over_remote_over_tag` |
 | INT-028 | right click (column header) | DONE | test `surface_at_routes_the_header_row` |
-| INT-029 | right click (CDV file) | DONE | `ClickTarget::CdvFile` (`src/app.rs:409`) + `open_menu_at` open `MenuSurface::FileRow` (`src/main.rs:307-312`); `MenuContext.path` is now populated, without which all nine A65…A73 rows rendered disabled. Test `surface_at_reads_the_docked_cdv_as_file_rows` |
+| INT-029 | right click (CDV file) | DONE | `ClickTarget::CdvFile` (`src/app.rs:409`) + `open_menu_at` open `MenuSurface::FileRow` (`src/main.rs:307-312`); `MenuContext.path` is now populated, without which all nine A65…A73 rows rendered disabled. Test `surface_at_reads_the_inline_cdv_as_file_rows` |
 | INT-030 | click (URL / link) | BACKLOG | no in-view link navigation (see ACT-062/ACT-063) |
 | INT-031 | right click (URL / link) | BACKLOG | the `Link` menu exists but nothing routes a click to it (see INT-029) |
 | INT-032 | click / right click (anywhere else) | DONE | anything in the body falls back to the commit row; test `surface_at_routes_rows_refs_and_empty_space` |
@@ -446,7 +446,7 @@ those rows say "no form field".
 | INT-048 | click commit row (expand) | DESIGN-DIFFERENCE | `Enter` toggles; test `enter_toggles_the_selected_row_only` |
 | INT-049 | click same commit (collapse) | DESIGN-DIFFERENCE | `Enter` toggles; test `enter_toggles_the_selected_row_only` |
 | INT-050 | click folder (CDV tree) | DONE | `ClickTarget::CdvFolder` (`src/app.rs:415`) → `toggle_cdv_folder` (`src/app.rs:1217`, left-click arm `src/main.rs:278`), the same open/closed flip the reference binds to `.fileTreeFolder` (`web/main.ts:2968-2978`). Test `a_folder_click_toggles_it_open_and_closed` |
-| INT-051 | click (CDV file row) | DONE | left-click resolves through `surface_at` → `CdvState::select_path` (`src/cdv.rs:339`, arm `src/main.rs:272-276`). Test `surface_at_reads_the_docked_cdv_as_file_rows` |
+| INT-051 | click (CDV file row) | DONE | left-click resolves through `surface_at` → `CdvState::select_path` (`src/cdv.rs:339`, arm `src/main.rs:272-276`). Test `surface_at_reads_the_inline_cdv_as_file_rows` |
 | INT-052 | match case toggle (`Aa`) | DONE | `Alt+C`; test `case_sensitivity_follows_the_toggle` |
 | INT-053 | regex toggle (`.*`) | DONE | `Alt+R`; test `regex_mode_uses_the_engine` |
 | INT-054 | search scope | DONE | test `literal_search_covers_every_scope_branch` |
@@ -514,7 +514,7 @@ those rows say "no form field".
 | VIS-046 | Diff-possible file | DONE | test `vis_047_a_modified_text_file_shows_its_counts` |
 | VIS-047 | Binary file (no diff) | DONE | test `vis_047_a_binary_file_says_it_cannot_be_diffed` |
 | VIS-048 | Submodule entry | DONE | test `vis_048_a_submodule_gets_its_own_marker` |
-| VIS-049 | CDV docked vs inline | DESIGN-DIFFERENCE | docked pane only (SET-004); test `the_panel_never_swallows_the_commit_list` |
+| VIS-049 | CDV docked vs inline | DESIGN-DIFFERENCE | the terminal has one layout — inline under the commit row, the reference's own default — and does not offer the `Docked to Bottom` alternative (SET-004, `UD-001`); test `the_panel_never_swallows_the_commit_list` |
 | VIS-050 | Code review active | NOT-PORTED | R4 code-review workspace state |
 | VIS-051 | External diff available | DESIGN-DIFFERENCE | availability is shown; the external tool is not launched (ACT-109 is BACKLOG) |
 | VIS-052 | Untracked file | DONE | test `vis_052_an_untracked_file_is_diffable` |
