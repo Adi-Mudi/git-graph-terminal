@@ -1264,6 +1264,33 @@ pub fn dispatch(repo: &Path, action: RefAction, target: &ActionTarget) -> Dispat
     }
 }
 
+/// Run a plan the user has explicitly confirmed (W6/T2).
+///
+/// [`dispatch`] refuses [`PlanKind::Confirm`] plans on purpose — that is the
+/// first half of the two-step safety rule. This is the second half: the W6
+/// dialog calls it **only** after the user submitted the confirmation, so a
+/// cancelled dialog provably never reaches git.
+///
+/// Only a `Confirm` plan is accepted. Anything else is a programming error in
+/// the dialog layer (the menu would have run it directly), and it is reported
+/// rather than silently executed.
+pub fn execute_confirmed(repo: &Path, plan: &ActionPlan) -> DispatchOutcome {
+    if !plan.kind.is_gated() {
+        return DispatchOutcome::Skipped(plan.clone());
+    }
+    let args: Vec<&str> = plan.argv.iter().map(String::as_str).collect();
+    match data::run_git(repo, &args) {
+        Ok(stdout) => DispatchOutcome::Executed {
+            plan: plan.clone(),
+            stdout,
+        },
+        Err(error) => DispatchOutcome::Failed {
+            plan: plan.clone(),
+            error,
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
