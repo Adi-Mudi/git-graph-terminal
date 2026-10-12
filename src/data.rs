@@ -20,6 +20,11 @@ const RS: char = '\u{0}';
 /// `git log --format` field list (7 fields, FS-separated).
 const LOG_FORMAT: &str = "--format=%H\u{1f}%h\u{1f}%P\u{1f}%an\u{1f}%at\u{1f}%s\u{1f}%D";
 
+/// The reference's sentinel hash for the uncommitted-changes row
+/// (`UNCOMMITTED`, `web/views.ts`). `data.rs` never emits it as a commit hash,
+/// so it doubles as "the working directory" in a comparison.
+pub const UNCOMMITTED: &str = "UNCOMMITTED";
+
 /// A failure of the `git` subprocess (never a panic).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GitError {
