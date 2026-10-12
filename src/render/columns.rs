@@ -15,8 +15,10 @@ use std::collections::HashSet;
 
 use crate::app::ColumnState;
 use crate::data::Commit;
+use crate::find::FindWidget;
 use crate::layout::types::{Lane, RowIdx};
 use crate::render::cell::CELLS_PER_LANE;
+use crate::render::{highlighted, FIND_CURRENT_BG};
 
 /// Screen column where the text columns start — `2 * max_lane + 2`.
 pub fn text_offset(max_lane: Lane) -> u16 {
@@ -89,7 +91,8 @@ pub fn header(columns: &ColumnState) -> TuiRow<'static> {
 /// rows are appended after them. That keeps table body line `d` aligned with
 /// graph display row `d` (both driven by the same `scroll`). `selected` is an
 /// absolute commit index (not a display row). `columns` carries the W5 column
-/// visibility toggles.
+/// visibility toggles. `find` carries the W6 find widget while it is visible, so
+/// matched characters are tinted and the current match's row is filled.
 pub fn commits_table_window(
     commits: &[Commit],
     expanded: &HashSet<RowIdx>,
@@ -97,6 +100,7 @@ pub fn commits_table_window(
     scroll: u16,
     selected: Option<usize>,
     columns: &ColumnState,
+    find: Option<&FindWidget>,
 ) -> Table<'static> {
     let mut body: Vec<TuiRow<'static>> = Vec::new();
     let mut cursor: u32 = 0; // display row at the top of the current commit
@@ -117,7 +121,7 @@ pub fn commits_table_window(
         // The row's own line is only shown when its top is in view; if it is
         // scrolled halfway off, the visible part is spacer.
         if top >= scroll {
-            body.push(commit_row(i, commit, selected, columns));
+            body.push(commit_row(i, commit, selected, columns, find));
         }
         if height > 1 {
             let first_gap = top + 1;
@@ -139,10 +143,14 @@ fn commit_row(
     commit: &Commit,
     selected: Option<usize>,
     columns: &ColumnState,
+    find: Option<&FindWidget>,
 ) -> TuiRow<'static> {
     let mut style = Style::default();
     if selected == Some(idx) {
         style = style.add_modifier(Modifier::BOLD | Modifier::REVERSED);
+    } else if find.map(|find| find.row_is_current(idx)).unwrap_or(false) {
+        // `tr.commit.findCurrentCommit` (`web/styles/main.css:665-668`).
+        style = style.bg(FIND_CURRENT_BG);
     }
     let dim = Style::default().fg(Color::DarkGray);
     let hash = Style::default().fg(Color::Yellow);
@@ -150,21 +158,40 @@ fn commit_row(
     let author = Style::default().fg(Color::Magenta);
     let refs = Style::default().fg(Color::Cyan);
 
+    // The row-level tint above only covers the cells the table paints; every
+    // text cell is built through `highlighted` so the match spans win.
+    let row_tint = style;
     let mut cells = vec![
-        TuiCell::from(Line::styled(format!("{:>5}", idx + 1), dim)),
-        TuiCell::from(Line::styled(commit.abbrev.clone(), hash)),
+        TuiCell::from(highlighted(&format!("{:>5}", idx + 1), dim, None)),
+        TuiCell::from(highlighted(&commit.abbrev, hash, find)),
     ];
     if columns.date {
-        cells.push(TuiCell::from(Line::styled(short_date(commit.date), date)));
+        cells.push(TuiCell::from(highlighted(
+            &short_date(commit.date),
+            date,
+            find,
+        )));
     }
     if columns.author {
-        cells.push(TuiCell::from(Line::styled(commit.author.clone(), author)));
+        cells.push(TuiCell::from(highlighted(&commit.author, author, find)));
     }
     if columns.commit {
-        cells.push(TuiCell::from(Line::styled(commit.subject.clone(), style)));
+        cells.push(TuiCell::from(highlighted(
+            &commit.subject,
+            row_tint,
+            find,
+        )));
     }
-    cells.push(TuiCell::from(Line::styled(commit.refs.join(", "), refs)));
-    TuiRow::new(cells)
+    cells.push(TuiCell::from(highlighted(
+        &commit.refs.join(", "),
+        refs,
+        find,
+    )));
+    let mut row = TuiRow::new(cells);
+    if row_tint != Style::default() {
+        row = row.style(row_tint);
+    }
+    row
 }
 
 /// A blank spacer row for the reserved expansion gap.
@@ -180,6 +207,21 @@ pub fn short_date(timestamp: i64) -> String {
     let days = timestamp.div_euclid(86_400);
     let (year, month, day) = civil_from_days(days);
     format!("{year:04}-{month:02}-{day:02}")
+}
+
+/// Format a UNIX timestamp as `YYYY-MM-DD HH:MM:SSZ` — the reference's
+/// `formatLongDate` in ISO mode (`web/utils.ts:315-325`).
+///
+/// The reference renders in the browser's local timezone and appends a numeric
+/// offset; a TUI has no local-timezone database without another dependency, so
+/// this renders UTC and appends `Z`. The date and time fields are byte-for-byte
+/// the reference's ISO format.
+pub fn long_date(timestamp: i64) -> String {
+    let days = timestamp.div_euclid(86_400);
+    let seconds = timestamp.rem_euclid(86_400);
+    let (year, month, day) = civil_from_days(days);
+    let (hour, minute, second) = (seconds / 3600, (seconds % 3600) / 60, seconds % 60);
+    format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02}Z")
 }
 
 /// Days since 1970-01-01 → `(year, month, day)`.
@@ -229,6 +271,14 @@ mod tests {
     }
 
     #[test]
+    fn long_dates_render_the_reference_iso_format() {
+        assert_eq!(long_date(0), "1970-01-01 00:00:00Z");
+        assert_eq!(long_date(1_700_000_000), "2023-11-14 22:13:20Z");
+        assert_eq!(long_date(86_399), "1970-01-01 23:59:59Z");
+        assert_eq!(long_date(86_400), "1970-01-02 00:00:00Z");
+    }
+
+    #[test]
     fn header_names_all_five_columns() {
         let headers = headers(&ColumnState::default());
         assert_eq!(headers.len(), 6, "idx, hash, date, author, subject, refs");
@@ -259,9 +309,9 @@ mod tests {
         ];
         let no_expand = HashSet::new();
         let columns = ColumnState::default();
-        let _ = commits_table_window(&rows, &no_expand, 4, 0, Some(1), &columns);
-        let _ = commits_table_window(&rows, &no_expand, 4, 5, None, &columns);
-        let _ = commits_table_window(&[], &no_expand, 4, 0, None, &columns);
+        let _ = commits_table_window(&rows, &no_expand, 4, 0, Some(1), &columns, None);
+        let _ = commits_table_window(&rows, &no_expand, 4, 5, None, &columns, None);
+        let _ = commits_table_window(&[], &no_expand, 4, 0, None, &columns, None);
     }
 
     #[test]
@@ -278,8 +328,15 @@ mod tests {
         expanded.insert(1);
 
         let render = |expanded: &HashSet<RowIdx>| -> Vec<String> {
-            let table =
-                commits_table_window(&rows, expanded, 4, 0, Some(1), &ColumnState::default());
+            let table = commits_table_window(
+                &rows,
+                expanded,
+                4,
+                0,
+                Some(1),
+                &ColumnState::default(),
+                None,
+            );
             let backend = TestBackend::new(60, 12);
             let mut terminal =
                 Terminal::new(backend).unwrap_or_else(|e: std::convert::Infallible| match e {});

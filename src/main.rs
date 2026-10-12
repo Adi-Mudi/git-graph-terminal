@@ -27,7 +27,11 @@
 
 mod actions;
 mod app;
+mod cdv;
 mod data;
+mod dialog;
+mod files;
+mod find;
 mod keymap;
 mod layout;
 mod menu;

@@ -16,6 +16,20 @@
 //! the render functions read that instead of a `ratatui::ListState`. Expanded
 //! rows reserve `EXPANDED_EXTRA_ROWS` blank terminal rows in **both** panes so
 //! the graph row and the text row keep their indices.
+//!
+//! W6 adds three overlays, each drawn after the pane it covers:
+//!
+//! * [`find_bar`] — the find widget, pinned to the **top right** of the window
+//!   exactly like `#findWidget` (`web/styles/findWidget.css:1-5`: `position:
+//!   fixed; top: 0; right: 28px`). It also tints the matched characters of every
+//!   visible cell ([`highlighted`]) and the current match's row.
+//! * [`crate::cdv::draw`] — the commit details view, docked to the **bottom**
+//!   (`#cdv.docked`, `web/styles/main.css:309-320`).
+//! * [`dialog_popup`] — the modal confirmation dialog, centred
+//!   (`.dialog`, `web/styles/dialog.css:1-16`).
+//!
+//! Overlays are drawn in the order the reference stacks them: CDV (z-index 20),
+//! find widget (21), dialog (41), context menu (51).
 
 pub mod cell;
 pub mod columns;
@@ -30,6 +44,9 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragra
 use ratatui::Frame;
 
 use crate::app::{AppState, ColumnState, HitGeometry, EXPANDED_EXTRA_ROWS};
+use crate::cdv;
+use crate::dialog::Dialog;
+use crate::find::FindWidget;
 use crate::layout::types::{GraphLayout, RowIdx};
 use crate::menu::ContextMenu;
 use crate::render::columns::{commits_table_window, text_offset};
@@ -38,6 +55,21 @@ use crate::render::graph_widget::GraphWidget;
 
 /// One `│` row for the uncommitted entry and one for the status bar.
 const STATUS_HEIGHT: u16 = 1;
+
+/// Height of the find bar: a bordered box with one content row.
+///
+/// `#findWidget` is 34 px tall (`web/styles/findWidget.css:5`), which is two
+/// terminal rows; the border costs one more.
+pub const FIND_BAR_HEIGHT: u16 = 3;
+
+/// `--vscode-editor-findMatchHighlightBackground`: the tint behind a matched
+/// character (`findWidget.ts:1959`, applied to the `findMatch` spans).
+const FIND_MATCH_BG: Color = Color::Indexed(226);
+/// The foreground that stays readable on [`FIND_MATCH_BG`].
+const FIND_MATCH_FG: Color = Color::Black;
+/// `--git-graph-findMatchCommit`: the tint of the **current** match's row
+/// (`web/styles/main.css:665-668`).
+pub(crate) const FIND_CURRENT_BG: Color = Color::Indexed(58);
 
 /// Extra columns the text side needs before the graph is worth showing.
 const MIN_TEXT_WIDTH: u16 = 24;
@@ -67,17 +99,249 @@ impl ViewOptions<'_> {
 
 /// Draw the whole frame: main area + status bar + any open context menu.
 pub fn ui(frame: &mut Frame, state: &AppState, view: &ViewOptions<'_>) {
-    let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(STATUS_HEIGHT)])
-        .split(frame.area());
+    let rows = overlay_rows(state, frame.area().height);
+    let chunks = Layout::vertical([
+        Constraint::Min(1),
+        Constraint::Length(rows.cdv),
+        Constraint::Length(rows.find),
+        Constraint::Length(STATUS_HEIGHT),
+    ])
+    .split(frame.area());
     match view.graph {
         Some(layout) => graph_view(frame, chunks[0], state, layout, view),
         None => commit_list(frame, chunks[0], state),
     }
-    status_bar(frame, chunks[1], state, view);
-    // The popup is drawn last so it covers both panes.
+    // The docked CDV sits directly above the status bar (`#cdv.docked`).
+    if let Some(panel) = &state.cdv {
+        cdv::draw(frame, chunks[1], panel, state.cdv_focused);
+    }
+    if state.find.visible {
+        find_bar(frame, chunks[2], &state.find);
+    }
+    status_bar(frame, chunks[3], state, view);
+    // A modal dialog blocks the whole window; the context menu still stacks on
+    // top of it so the two never fight over the same rows.
+    if let Some(dialog) = &state.dialog {
+        dialog_popup(frame, dialog, frame.area());
+    }
     if let Some(menu) = &state.menu {
         context_menu(frame, menu, frame.area());
     }
+}
+
+/// Rows the W6 overlays take out of the commit body.
+///
+/// `ui` and the event loop must agree on this number: `ui` lays the overlays out
+/// with it and [`crate::app::AppState::overlay_rows`] reports it so
+/// `status.height` (the viewport used by paging and by the follow-the-selection
+/// scroll) is the rows that are actually visible.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct OverlayRows {
+    /// The docked commit details view, if open.
+    pub cdv: u16,
+    /// The find bar, if visible.
+    pub find: u16,
+}
+
+/// How many rows the overlays claim for a screen of `screen_height` rows.
+pub fn overlay_rows(state: &AppState, screen_height: u16) -> OverlayRows {
+    OverlayRows {
+        cdv: state
+            .cdv
+            .as_ref()
+            .map(|panel| cdv::panel_height(panel, screen_height, STATUS_HEIGHT))
+            .unwrap_or(0),
+        find: if state.find.visible {
+            FIND_BAR_HEIGHT
+        } else {
+            0
+        },
+    }
+}
+
+/// The find widget's bar, pinned to the top right of `area`.
+///
+/// Width is clamped so a narrow terminal still shows the box rather than
+/// clipping it off the left edge.
+pub fn find_bar(frame: &mut Frame, area: Rect, find: &FindWidget) {
+    if area.height == 0 || area.width == 0 {
+        return;
+    }
+    let width = area.width.min(64).max(area.width.min(24));
+    let rect = Rect {
+        x: area.width.saturating_sub(width),
+        y: 0,
+        width,
+        height: area.height.min(FIND_BAR_HEIGHT),
+    };
+    frame.render_widget(Clear, rect);
+
+    let border = if find.error.is_some() {
+        Style::default().fg(Color::Red)
+    } else {
+        Style::default().fg(Color::Cyan)
+    };
+    let title = format!(" find [{}] ", find.counter());
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(border)
+        .title(title);
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+    if inner.height == 0 {
+        return;
+    }
+
+    // The reference draws the toggles as `Aa` / `.*` / `cdv` buttons
+    // (`#findCaseSensitive`, `#findIsRegex`, `#findOpenCommitDetailsView`); a
+    // terminal shows the same flags as bracketed markers plus a caret.
+    let mut spans = vec![Span::raw(format!("{}\u{2588}", find.text))];
+    if find.case_sensitive {
+        spans.push(Span::styled(" [Aa]", Style::default().fg(Color::Yellow)));
+    }
+    if find.is_regex {
+        spans.push(Span::styled(" [.*]", Style::default().fg(Color::Yellow)));
+    }
+    if find.open_cdv {
+        spans.push(Span::styled(" [cdv]", Style::default().fg(Color::Yellow)));
+    }
+    if let Some(error) = &find.error {
+        spans.push(Span::styled(
+            format!(" {error}"),
+            Style::default().fg(Color::Red),
+        ));
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)), inner);
+}
+
+/// The modal dialog, centred like `.dialog` (`web/styles/dialog.css:1-16`).
+pub fn dialog_popup(frame: &mut Frame, dialog: &Dialog, screen: Rect) {
+    if screen.height == 0 || screen.width == 0 {
+        return;
+    }
+    let rows = dialog_rows(dialog) as u16;
+    let height = rows.min(screen.height);
+    let width = screen.width.min(64).max(screen.width.min(30));
+    let rect = Rect {
+        x: screen.width.saturating_sub(width) / 2,
+        y: screen.height.saturating_sub(height) / 2,
+        width,
+        height,
+    };
+    frame.render_widget(Clear, rect);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan))
+        .title(format!(" {} ", dialog.title));
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+
+    let lines = dialog_lines(dialog);
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+/// How many terminal rows [`dialog_popup`] needs (body + fields + buttons + border).
+fn dialog_rows(dialog: &Dialog) -> usize {
+    dialog_lines(dialog).len().saturating_add(2).max(3)
+}
+
+/// The dialog's body, field list and button strip, in draw order.
+///
+/// Kept separate from the widget so the layout maths and the text can both be
+/// asserted in tests without a terminal.
+fn dialog_lines(dialog: &Dialog) -> Vec<Line<'static>> {
+    let dim = Style::default().fg(Color::DarkGray);
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    for body in &dialog.body {
+        lines.push(Line::raw(body.clone()));
+    }
+    for (index, field) in dialog.fields.iter().enumerate() {
+        let focusable = dialog.focused_field().map(|f| f.name.as_str()) == Some(&field.name);
+        let marker = if focusable { "\u{25b8}" } else { " " };
+        let style = if focusable {
+            Style::default().fg(Color::Yellow)
+        } else {
+            Style::default()
+        };
+        lines.push(Line::from(vec![
+            Span::raw(format!(" {marker} {}: ", field.label)),
+            Span::styled(field.display_value(), style),
+        ]));
+        let _ = index;
+    }
+    if !dialog.fields.is_empty() {
+        lines.push(Line::raw(String::new()));
+    }
+    let buttons: Vec<Span> = dialog
+        .buttons
+        .iter()
+        .enumerate()
+        .map(|(index, label)| {
+            let text = format!(" [ {label} ] ");
+            if dialog.focused_button() == Some(index) {
+                Span::styled(
+                    text,
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                )
+            } else {
+                Span::styled(text, dim)
+            }
+        })
+        .collect();
+    lines.push(Line::from(buttons));
+    if let Some(error) = &dialog.error {
+        lines.push(Line::styled(
+            error.clone(),
+            Style::default().fg(Color::Red),
+        ));
+    }
+    lines
+}
+
+/// `text` with every find match tinted, as one line.
+///
+/// [`FindWidget::ranges_in`] returns **character** offsets (see the module docs
+/// of [`crate::find`]), so the split happens on `chars()`, never on byte
+/// indices. `find: None` and an empty pattern both return the plain line, so
+/// the pre-W6 rendering is byte-for-byte unchanged when the widget is hidden.
+pub(crate) fn highlighted(text: &str, style: Style, find: Option<&FindWidget>) -> Line<'static> {
+    let ranges = match find {
+        Some(find) if !find.text.is_empty() => find.ranges_in(text),
+        _ => Vec::new(),
+    };
+    if ranges.is_empty() {
+        return Line::styled(text.to_string(), style);
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let match_style = Style::default().bg(FIND_MATCH_BG).fg(FIND_MATCH_FG);
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut cursor = 0usize;
+    for (start, end) in ranges {
+        let start = start.min(chars.len());
+        let end = end.min(chars.len()).max(start);
+        if start > cursor {
+            spans.push(Span::styled(
+                chars[cursor..start].iter().collect::<String>(),
+                style,
+            ));
+        }
+        spans.push(Span::styled(
+            chars[start..end].iter().collect::<String>(),
+            match_style,
+        ));
+        cursor = end;
+    }
+    if cursor < chars.len() {
+        spans.push(Span::styled(
+            chars[cursor..].iter().collect::<String>(),
+            style,
+        ));
+    }
+    Line::from(spans)
 }
 
 /// Geometry the mouse router needs, derived from the same numbers `ui` used.
@@ -251,6 +515,7 @@ fn graph_view(
             state.scroll,
             selected.map(|row| row as usize),
             &state.columns,
+            state.find.visible.then_some(&state.find),
         ),
         columns[1],
     );

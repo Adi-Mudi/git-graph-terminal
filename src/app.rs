@@ -29,7 +29,11 @@ use std::collections::HashSet;
 use std::path::Path;
 
 use crate::actions::{self, RefAction};
+use crate::cdv::{self, CdvKind, CdvState};
 use crate::data::{self, Commit};
+use crate::dialog::{self, Dialog, DialogKey, DialogResult};
+use crate::files;
+use crate::find::FindWidget;
 use crate::layout::types::{GraphLayout, RowIdx};
 use crate::layout::{self, LayoutOpts, NavDir, NO_ROW};
 use crate::menu::{
@@ -100,6 +104,14 @@ pub struct AppState {
     pub pending_clipboard: Option<String>,
     /// Status-bar / viewport snapshot.
     pub status: StatusBarState,
+    /// The open commit details view, if any (W6/T3).
+    pub cdv: Option<CdvState>,
+    /// Does the CDV own the keyboard? (`Tab` toggles it.)
+    pub cdv_focused: bool,
+    /// The find widget's state (W6/T1); `visible` drives the bottom bar.
+    pub find: FindWidget,
+    /// The open modal dialog, if any (W6/T2). While `Some`, it owns the keyboard.
+    pub dialog: Option<Dialog>,
 }
 
 /// Every keyboard-driven state change.
@@ -134,6 +146,36 @@ pub enum Action {
     Refresh,
     /// Leave the TUI — `q` / Esc.
     Quit,
+    /// Open the commit details view for the selected row — `d` (W6/T3).
+    CdvOpen,
+    /// Close the commit details view — `Esc` while it is focused (W6/T3).
+    CdvClose,
+    /// Move the keyboard focus between the commit list and the CDV — `Tab`.
+    CdvFocusToggle,
+    /// Switch the CDV file list between Tree and List — `v` (VIS-041/VIS-042).
+    CdvToggleView,
+    /// Grow the CDV panel — `+` (the `cdvHeightResize` handle).
+    CdvResizeUp,
+    /// Shrink the CDV panel — `-`.
+    CdvResizeDown,
+    /// Open the find widget — `Ctrl+F` (W6/T1).
+    FindOpen,
+    /// Close the find widget and drop the highlight — `Ctrl+F` again.
+    FindClose,
+    /// Jump to the next match, wrapping — `F3` / `Ctrl+G`.
+    FindNext,
+    /// Jump to the previous match, wrapping — `Shift+F3`.
+    FindPrev,
+    /// Toggle match case (`findIsCaseSensitive`) — `Alt+C`.
+    FindToggleCase,
+    /// Toggle regular-expression mode (`findIsRegex`) — `Alt+R`.
+    FindToggleRegex,
+    /// Toggle "open the CDV for each match" (`findOpenCommitDetailsView`) — `Alt+D`.
+    FindToggleCdv,
+    /// Submit the open dialog — `Enter` (C02/C12).
+    DialogConfirm,
+    /// Dismiss the open dialog — `Esc`.
+    DialogCancel,
 }
 
 /// What [`reduce`] wants the caller to do next.
@@ -352,6 +394,10 @@ impl AppState {
             menu: None,
             pending_clipboard: None,
             status,
+            cdv: None,
+            cdv_focused: false,
+            find: FindWidget::new(),
+            dialog: None,
         }
     }
 
@@ -564,6 +610,17 @@ impl AppState {
                 let mut target = menu.context.action_target();
                 target.clipboard = clipboard_text(item.id, &menu.context);
                 let outcome = actions::dispatch(repo, action, &target);
+                // W6/T2: a gated plan opens the confirmation dialog instead of
+                // stopping at the W5 stub. `dispatch` already refused to run it,
+                // so the dialog is the only path to `execute_confirmed`.
+                if let actions::DispatchOutcome::NeedsConfirm(plan) = &outcome {
+                    let plan = plan.clone();
+                    if open_dialog_for_plan(self, action, &target, &plan) {
+                        self.menu = None;
+                        self.status.last_action = Some(format!("confirm: {}", plan.label));
+                        return self.status.last_action.clone().unwrap_or_default();
+                    }
+                }
                 if matches!(outcome.plan().kind, actions::PlanKind::Execute)
                     && outcome.plan().mutates()
                 {
@@ -695,7 +752,16 @@ pub fn reduce(state: &mut AppState, action: Action, repo: &Path) -> Outcome {
         Action::PagePrev => select_page(state, -1),
         Action::Top => state.selected = 0,
         Action::Bottom => state.selected = state.rows.len().saturating_sub(1) as RowIdx,
-        Action::ToggleExpand => toggle_expand(state),
+        Action::ToggleExpand => {
+            toggle_expand(state);
+            // W6/T3: expanding a row loads its commit details view; collapsing
+            // it (or expanding a different row) closes or replaces the panel.
+            if state.expanded.contains(&state.selected) {
+                open_cdv(state, repo);
+            } else {
+                close_cdv_for(state, state.selected);
+            }
+        }
         // Right / Ctrl+Down follows the first parent (older, `graph.ts:598-603`).
         Action::NextBranch => select_branch(state, NavDir::Down),
         // Left / Ctrl+Up follows the first child (newer, `graph.ts:626-644`).
@@ -704,6 +770,47 @@ pub fn reduce(state: &mut AppState, action: Action, repo: &Path) -> Outcome {
         Action::StashNext => select_stash(state, true),
         Action::StashPrev => select_stash(state, false),
         Action::Refresh => reload(state, repo),
+
+        // W6/T3 — the commit details view.
+        Action::CdvOpen => open_cdv(state, repo),
+        Action::CdvClose => {
+            state.cdv = None;
+            state.cdv_focused = false;
+        }
+        Action::CdvFocusToggle => state.cdv_focused = !state.cdv_focused && state.cdv.is_some(),
+        Action::CdvToggleView => {
+            if let Some(cdv) = state.cdv.as_mut() {
+                cdv.toggle_view();
+            }
+        }
+        Action::CdvResizeUp => resize_cdv(state, 2),
+        Action::CdvResizeDown => resize_cdv(state, -2),
+
+        // W6/T1 — the find widget.
+        Action::FindOpen => {
+            state.find.show();
+            recompute_find(state);
+        }
+        Action::FindClose => state.find.close(),
+        Action::FindNext => find_step(state, true),
+        Action::FindPrev => find_step(state, false),
+        Action::FindToggleCase => {
+            state.find.case_sensitive = !state.find.case_sensitive;
+            recompute_find(state);
+        }
+        Action::FindToggleRegex => {
+            state.find.is_regex = !state.find.is_regex;
+            recompute_find(state);
+        }
+        Action::FindToggleCdv => {
+            state.find.open_cdv = !state.find.open_cdv;
+            follow_find_cdv(state, repo);
+        }
+
+        // W6/T2 — the modal dialog. The keyboard text editing lives in
+        // [`AppState::dialog_key`]; these two actions are the terminal states.
+        Action::DialogConfirm => confirm_dialog(state, repo),
+        Action::DialogCancel => state.dialog = None,
     }
     state.sync_status();
     state.ensure_visible();
@@ -739,6 +846,146 @@ fn toggle_expand(state: &mut AppState) {
     if !state.expanded.remove(&row) {
         state.expanded.insert(row);
     }
+}
+
+/* ------------------------------------------------------------------ */
+/* W6/T3 — the commit details view                                     */
+/* ------------------------------------------------------------------ */
+
+/// Load the commit details view for the selected row.
+///
+/// The reference fetches the details asynchronously and paints a spinner first
+/// (`web/main.ts:2536`). The terminal port has no async runtime, so the loading
+/// state exists but is filled in before the next frame; the label logic is
+/// still exercised because [`CdvState::loading`] is what the panel starts as.
+pub fn open_cdv(state: &mut AppState, repo: &Path) {
+    let row = state.selected;
+    let Some(commit) = state.rows.get(row as usize) else {
+        return;
+    };
+    let hash = commit.hash.clone();
+    let mut cdv = CdvState::loading(row, &hash, CdvKind::Commit, None);
+    match files::commit_details(repo, &hash) {
+        Ok(detail) => match files::commit_file_changes(repo, &hash) {
+            Ok(changes) => cdv.loaded(detail, changes),
+            Err(error) => cdv.failed(&error.to_string()),
+        },
+        Err(error) => cdv.failed(&error.to_string()),
+    }
+    state.cdv = Some(cdv);
+}
+
+/// Close the panel when it belongs to `row` (collapsing that row).
+fn close_cdv_for(state: &mut AppState, row: RowIdx) {
+    if state.cdv.as_ref().map(|cdv| cdv.row) == Some(row) {
+        state.cdv = None;
+        state.cdv_focused = false;
+    }
+}
+
+/// Grow/shrink the docked panel (`cdvHeightResize`).
+fn resize_cdv(state: &mut AppState, delta: i32) {
+    if let Some(cdv) = state.cdv.as_mut() {
+        cdv.resize(delta);
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/* W6/T1 — the find widget                                             */
+/* ------------------------------------------------------------------ */
+
+/// Rescan every row, keeping the current match if it survives
+/// (`findWidget.ts:344-351`).
+pub fn recompute_find(state: &mut AppState) {
+    let previous = state.find.current_hash().map(str::to_string);
+    let uncommitted = None;
+    state
+        .find
+        .recompute(&state.rows, &state.columns, uncommitted, previous.as_deref());
+}
+
+/// Move to the next/previous match and follow it with the selection.
+fn find_step(state: &mut AppState, forward: bool) {
+    let row = if forward {
+        state.find.next()
+    } else {
+        state.find.prev()
+    };
+    if let Some(row) = row {
+        state.selected = row as RowIdx;
+    }
+}
+
+/// When `findOpenCommitDetailsView` is on, load the CDV for the current match
+/// (`findWidget.ts:368-378`). When it is turned off, close the panel the find
+/// widget opened.
+fn follow_find_cdv(state: &mut AppState, repo: &Path) {
+    if !state.find.open_cdv {
+        state.cdv = None;
+        state.cdv_focused = false;
+        return;
+    }
+    if let Some(row) = state.find.current_row() {
+        state.selected = row as RowIdx;
+        open_cdv(state, repo);
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/* W6/T2 — the modal dialog                                            */
+/* ------------------------------------------------------------------ */
+
+/// Route one keypress to the open dialog, returning what it decided.
+///
+/// This is the second half of the W5→W6 two-step rule: the dialog never runs
+/// git itself. [`Action::DialogConfirm`] does, and only after the user
+/// submitted.
+pub fn dialog_key(state: &mut AppState, key: DialogKey) -> Option<DialogResult> {
+    let dialog = state.dialog.as_mut()?;
+    dialog.handle(key)
+}
+
+/// Run the plan the user confirmed, then close the dialog.
+///
+/// Only the dialog's submit button reaches [`actions::execute_confirmed`], and
+/// only a `PlanKind::Confirm` plan is accepted — so cancelling is provably a
+/// no-op. The result lands in `status.last_action` for the status bar.
+fn confirm_dialog(state: &mut AppState, repo: &Path) {
+    let Some(dialog) = state.dialog.as_ref() else {
+        return;
+    };
+    // A form that fails validation must not close; the error stays on screen.
+    let button = dialog.focused_button().unwrap_or(0);
+    let Some(plan) = dialog.plan_for_submit(button) else {
+        state.dialog = None;
+        state.status.last_action = Some("cancelled".to_string());
+        return;
+    };
+    let outcome = actions::execute_confirmed(repo, &plan);
+    let line = outcome.status_line();
+    state.dialog = None;
+    state.status.last_action = Some(line);
+    if outcome.plan().mutates() {
+        reduce(state, Action::Refresh, repo);
+    }
+}
+
+/// Open the dialog a gated plan needs, if the dialog layer knows how to build
+/// one for it.
+///
+/// Returns `true` when a dialog was opened, so the caller knows the two-step
+/// gate is now in the user's hands rather than stubbed.
+pub fn open_dialog_for_plan(
+    state: &mut AppState,
+    action: RefAction,
+    target: &actions::ActionTarget,
+    plan: &actions::ActionPlan,
+) -> bool {
+    let actions::PlanKind::Confirm(reason) = plan.kind else {
+        return false;
+    };
+    state.dialog = Some(dialog::dialog_for_plan(action, target, plan, reason));
+    true
 }
 
 /// Branch-aware movement via a1's `layout::nav()`. No wrap: an absent relation
@@ -1409,7 +1656,11 @@ mod tests {
         state.menu.as_mut().unwrap().selected = index;
         let before = state.rows.clone();
         let line = state.activate_menu(Path::new("/nonexistent/ggt-w5"));
-        assert!(line.contains("needs confirmation"), "{line}");
+        // W6/T2: the gated row now opens the confirmation dialog instead of
+        // stopping at the W5 stub, so nothing runs until the user submits.
+        assert!(line.contains("confirm: Delete Branch"), "{line}");
+        let dialog = state.dialog.as_ref().expect("the confirmation dialog");
+        assert!(dialog.pending.is_some(), "the plan waits for the user");
         assert_eq!(state.rows, before, "a gated plan never runs git");
         assert!(state.pending_clipboard.is_none());
     }

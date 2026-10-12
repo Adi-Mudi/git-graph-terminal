@@ -1,4 +1,4 @@
-//! Keyboard → [`Action`] mapping (M2-W4).
+//! Keyboard → [`Action`] mapping (M2-W4, extended in W6).
 //!
 //! One pure function, [`action_for`], so the binding table is easy to read,
 //! easy to test, and independent of the terminal. It only looks at the key
@@ -15,6 +15,32 @@
 //! * Esc is not bound by the reference; in a terminal UI it is the conventional
 //!   "quit/close". W4 has no overlays, so Esc quits. W5/W6 overlays can claim it
 //!   by handling it before this map.
+//!
+//! ## W6 additions
+//!
+//! The reference reaches the find widget and the CDV through **click targets**,
+//! not keybindings: `#findBtn` / `#cdvFileViewTypeTree` / `#cdvFileViewTypeList`
+//! (`web/main.ts:2577-2580`). A terminal needs keys, so the W6 bindings below
+//! are the terminal equivalents of those controls. They are deliberately
+//! conventional (`Ctrl+F` for find, `F3`/`Shift+F3` for next/previous) and every
+//! one of them has a unit test naming the control it stands in for.
+//!
+//! | key | action | reference control |
+//! | --- | ------ | ----------------- |
+//! | `Ctrl+F` | open/close find | `#findBtn` |
+//! | `F3` / `Ctrl+G` | next match | `#findNext` |
+//! | `Shift+F3` | previous match | `#findPrev` |
+//! | `Alt+C` | match case | `#findCaseSensitive` |
+//! | `Alt+R` | regex mode | `#findIsRegex` |
+//! | `Alt+D` | open CDV per match | `#findOpenCommitDetailsView` |
+//! | `d` | open CDV | click a commit |
+//! | `Tab` | focus the CDV | — |
+//! | `v` | Tree/List file view | `#cdvFileViewTypeTree` / `#cdvFileViewTypeList` |
+//! | `+` / `-` | resize the CDV | `.cdvHeightResize` |
+//! | `Ctrl+W` | close the CDV | `#cdvClose` |
+//!
+//! `Alt`-modified keys were reserved and unbound in W4/W5; W6 claims exactly
+//! the three find toggles and nothing else.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -54,18 +80,43 @@ pub fn menu_nav_for(key: KeyEvent) -> Option<MenuNav> {
 
 /// Map one key event to an [`Action`], or `None` when the key is unbound.
 ///
-/// `Alt`-modified keys are reserved (W5/W6 context menus) and always `None`.
+/// `Alt`-modified keys are reserved: W6 claims only `Alt+C`, `Alt+R` and `Alt+D`
+/// (the find toggles); every other `Alt` chord stays unbound.
 pub fn action_for(key: KeyEvent) -> Option<Action> {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+    let alt = key.modifiers.contains(KeyModifiers::ALT);
 
-    if key.modifiers.contains(KeyModifiers::ALT) {
+    // W6 find toggles, checked before the blanket `Alt` rejection below.
+    if alt && !ctrl {
+        return match key.code {
+            KeyCode::Char('c') | KeyCode::Char('C') => Some(Action::FindToggleCase),
+            KeyCode::Char('r') | KeyCode::Char('R') => Some(Action::FindToggleRegex),
+            KeyCode::Char('d') | KeyCode::Char('D') => Some(Action::FindToggleCdv),
+            _ => None,
+        };
+    }
+    if alt {
         return None;
     }
 
     match key.code {
         KeyCode::Esc => Some(Action::Quit),
         KeyCode::Char('q') | KeyCode::Char('Q') if !ctrl => Some(Action::Quit),
+
+        // W6/T1 — find (the `#findBtn` / `#findNext` / `#findPrev` controls).
+        KeyCode::Char('f') if ctrl => Some(Action::FindOpen),
+        KeyCode::F(3) if shift => Some(Action::FindPrev),
+        KeyCode::F(3) => Some(Action::FindNext),
+        KeyCode::Char('g') if ctrl => Some(Action::FindNext),
+
+        // W6/T3 — the commit details view.
+        KeyCode::Char('w') if ctrl => Some(Action::CdvClose),
+        KeyCode::Char('d') if !shift => Some(Action::CdvOpen),
+        KeyCode::Tab => Some(Action::CdvFocusToggle),
+        KeyCode::Char('v') if !ctrl => Some(Action::CdvToggleView),
+        KeyCode::Char('+') | KeyCode::Char('=') => Some(Action::CdvResizeUp),
+        KeyCode::Char('-') | KeyCode::Char('_') => Some(Action::CdvResizeDown),
 
         // Branch nav: Right = first parent, Left = first child; Ctrl+Down/Up are aliases.
         KeyCode::Right => Some(Action::NextBranch),
@@ -189,7 +240,59 @@ mod tests {
         assert_eq!(action_for(key(KeyCode::Char('r'))), Some(Action::Refresh));
         assert_eq!(
             action_for(modified(KeyCode::Char('r'), KeyModifiers::CONTROL)),
-            Some(Action::Refresh)
+            Some(Action::Refresh),
+            "W4 behaviour is kept: Ctrl+r is still a refresh"
+        );
+    }
+
+    #[test]
+    fn find_keys_stand_in_for_the_find_widget_controls() {
+        assert_eq!(
+            action_for(modified(KeyCode::Char('f'), KeyModifiers::CONTROL)),
+            Some(Action::FindOpen),
+            "Ctrl+F opens the find widget (#findBtn)"
+        );
+        assert_eq!(action_for(key(KeyCode::F(3))), Some(Action::FindNext));
+        assert_eq!(
+            action_for(modified(KeyCode::F(3), KeyModifiers::SHIFT)),
+            Some(Action::FindPrev)
+        );
+        assert_eq!(
+            action_for(modified(KeyCode::Char('g'), KeyModifiers::CONTROL)),
+            Some(Action::FindNext)
+        );
+        assert_eq!(
+            action_for(modified(KeyCode::Char('c'), KeyModifiers::ALT)),
+            Some(Action::FindToggleCase)
+        );
+        assert_eq!(
+            action_for(modified(KeyCode::Char('r'), KeyModifiers::ALT)),
+            Some(Action::FindToggleRegex)
+        );
+        assert_eq!(
+            action_for(modified(KeyCode::Char('d'), KeyModifiers::ALT)),
+            Some(Action::FindToggleCdv)
+        );
+    }
+
+    #[test]
+    fn cdv_keys_stand_in_for_the_cdv_controls() {
+        assert_eq!(action_for(key(KeyCode::Char('d'))), Some(Action::CdvOpen));
+        assert_eq!(action_for(key(KeyCode::Tab)), Some(Action::CdvFocusToggle));
+        assert_eq!(
+            action_for(key(KeyCode::Char('v'))),
+            Some(Action::CdvToggleView),
+            "#cdvFileViewTypeTree / #cdvFileViewTypeList"
+        );
+        assert_eq!(action_for(key(KeyCode::Char('+'))), Some(Action::CdvResizeUp));
+        assert_eq!(
+            action_for(key(KeyCode::Char('-'))),
+            Some(Action::CdvResizeDown)
+        );
+        assert_eq!(
+            action_for(modified(KeyCode::Char('w'), KeyModifiers::CONTROL)),
+            Some(Action::CdvClose),
+            "#cdvClose"
         );
     }
 
@@ -197,9 +300,10 @@ mod tests {
     fn unbound_keys_are_none() {
         for event in [
             key(KeyCode::Char('z')),
-            key(KeyCode::Tab),
+            key(KeyCode::Char('y')),
             modified(KeyCode::Char('j'), KeyModifiers::ALT),
             modified(KeyCode::Char('j'), KeyModifiers::CONTROL),
+            modified(KeyCode::Char('f'), KeyModifiers::ALT),
         ] {
             assert_eq!(action_for(event), None);
         }
