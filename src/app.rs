@@ -3591,4 +3591,465 @@ mod tests {
         std::env::remove_var("GGT_CLIPBOARD_FILE");
         let _ = std::fs::remove_file(&path);
     }
+
+    /* ------------------------------------------------------------------ */
+    /* M4-W12 / T8 — the tab keys, the branch filter, the editor           */
+    /* ------------------------------------------------------------------ */
+
+    /// A real repository with a diverged branch and a tag, so a filter can
+    /// actually remove rows: `main` has two commits, `side` and `v1` hold only
+    /// the first.
+    fn forked_repo(tag: &str) -> PathBuf {
+        let repo = temp_repo(tag);
+        data::run_git(&repo, &["branch", "side"]).expect("git branch side");
+        data::run_git(&repo, &["tag", "v1"]).expect("git tag v1");
+        fs::write(repo.join("f.txt"), "1\n2\n").expect("write f.txt");
+        data::run_git(&repo, &["add", "f.txt"]).expect("git add");
+        data::run_git(&repo, &["commit", "-q", "-m", "c2"]).expect("git commit");
+        repo
+    }
+
+    fn uncommitted_file(
+        status: crate::files::GitFileStatus,
+        path: &str,
+    ) -> crate::uncommitted::UncommittedFile {
+        crate::uncommitted::UncommittedFile {
+            status,
+            path: path.to_string(),
+            old_path: path.to_string(),
+            staged: false,
+            unstaged: true,
+            additions: 1,
+            deletions: 0,
+        }
+    }
+
+    /// The `1` / `2` keys select their tab and `Tab` cycles between the two
+    /// (T1). The keymap already pins the keys to these actions; this pins the
+    /// state change the actions perform.
+    #[test]
+    fn the_tab_keys_select_and_cycle() {
+        let mut state = state_of(linear(4));
+        assert_eq!(state.tab, Tab::Overview, "the app opens on Overview");
+
+        reduce(&mut state, Action::TabBranches, Path::new("."));
+        assert_eq!(state.tab, Tab::Branches);
+        reduce(&mut state, Action::TabToggle, Path::new("."));
+        assert_eq!(state.tab, Tab::Overview, "Tab cycles back");
+        reduce(&mut state, Action::TabToggle, Path::new("."));
+        assert_eq!(state.tab, Tab::Branches);
+        reduce(&mut state, Action::TabOverview, Path::new("."));
+        assert_eq!(state.tab, Tab::Overview);
+    }
+
+    /// A switch drops the per-tab transients and re-seats the cursor on the
+    /// first row the new tab shows (T1).
+    #[test]
+    fn a_tab_switch_resets_the_scroll_and_reseats_the_cursor() {
+        let mut state = state_of(linear(10));
+        state.scroll = 4;
+        state.selected = 5;
+        state.inline_diff = Some(InlineDiff {
+            title: "git diff -- f".to_string(),
+            lines: Vec::new(),
+            source: DiffSource::Uncommitted(0),
+        });
+
+        set_tab(&mut state, Tab::Branches);
+
+        assert_eq!(state.tab, Tab::Branches);
+        assert_eq!(state.scroll, 0, "the new tab starts at the top");
+        assert!(
+            state.inline_diff.is_none(),
+            "an open diff belongs to the tab it was opened on"
+        );
+        assert_eq!(
+            state.selected, 0,
+            "the cursor lands on the first visible row"
+        );
+    }
+
+    /// Re-selecting the current tab is a no-op, so a stray `1` cannot throw
+    /// away the reader's place (T1).
+    #[test]
+    fn reselecting_the_current_tab_keeps_the_view() {
+        let mut state = state_of(linear(10));
+        state.scroll = 4;
+        state.selected = 5;
+        set_tab(&mut state, Tab::Overview);
+        assert_eq!(state.scroll, 4);
+        assert_eq!(state.selected, 5);
+    }
+
+    /// The uncommitted section lives only on Overview; the Branches tab shows
+    /// history alone (T1/T4).
+    #[test]
+    fn the_uncommitted_section_belongs_to_the_overview_tab() {
+        let mut state = state_of(linear(4));
+        state.uncommitted = crate::uncommitted::UncommittedState {
+            files: vec![uncommitted_file(
+                crate::files::GitFileStatus::Modified,
+                "src/lib.rs",
+            )],
+        };
+        assert!(state.uncommitted_height() > 0, "Overview shows the block");
+
+        set_tab(&mut state, Tab::Branches);
+        assert_eq!(state.uncommitted_height(), 0, "Branches hides the block");
+    }
+
+    /// `Enter` on the branch list filters the history to that ref's commits and
+    /// `Esc` brings the full history back (T2). The click path is covered by
+    /// [`a_branch_click_selects_and_filters`]; this is the key path, and the
+    /// only test that asserts the rows actually drop.
+    #[test]
+    fn the_enter_key_filters_the_history_to_a_branch() {
+        let repo = forked_repo("branch-key-filter");
+        let commits = data::commits(&repo).expect("commits");
+        assert_eq!(commits.len(), 2, "main has two commits");
+        let mut state = state_of(commits);
+        state.tab = Tab::Branches;
+        state.branches = crate::branches::load(&repo).expect("branches");
+        state.status.width = 100;
+        state.status.height = 22;
+
+        assert_eq!(state.visible_rows(), vec![0, 1], "no filter: both rows");
+
+        let side = state
+            .branches
+            .iter()
+            .position(|entry| entry.name == "side")
+            .expect("`side` is listed");
+        state.branch_selected = side;
+        reduce(&mut state, Action::ToggleExpand, &repo);
+
+        assert_eq!(
+            state.branch_filter.as_deref(),
+            Some("refs/heads/side"),
+            "the filter records the full refname"
+        );
+        assert_eq!(
+            state.visible_rows(),
+            vec![1],
+            "`side` reaches only the older commit, so the newer row drops out"
+        );
+        assert_eq!(state.selected, 1, "the cursor moves onto the surviving row");
+
+        // Esc clears the filter — and redraws instead of quitting.
+        assert_eq!(reduce(&mut state, Action::Quit, &repo), Outcome::Redraw);
+        assert!(state.branch_filter.is_none());
+        assert_eq!(state.visible_rows(), vec![0, 1], "every row is back");
+        let _ = fs::remove_dir_all(&repo);
+    }
+
+    /// The filter is not local-only: a tag row builds a `refs/tags/...` name
+    /// and filters the history the same way (T2).
+    #[test]
+    fn a_tag_row_filters_the_history_too() {
+        let repo = forked_repo("branch-key-tag");
+        let mut state = state_of(data::commits(&repo).expect("commits"));
+        state.tab = Tab::Branches;
+        state.branches = crate::branches::load(&repo).expect("branches");
+
+        let tag = state
+            .branches
+            .iter()
+            .position(|entry| entry.kind == RefKind::Tag)
+            .expect("the tag is listed");
+        state.branch_selected = tag;
+        reduce(&mut state, Action::ToggleExpand, &repo);
+
+        assert_eq!(state.branch_filter.as_deref(), Some("refs/tags/v1"));
+        assert_eq!(state.visible_rows(), vec![1]);
+        let _ = fs::remove_dir_all(&repo);
+    }
+
+    /// A refname git cannot resolve is reported on the status bar and leaves no
+    /// half-applied filter behind (T2).
+    #[test]
+    fn an_unresolvable_refname_reports_instead_of_filtering() {
+        let repo = temp_repo("branch-key-bad");
+        let mut state = state_of(linear(4));
+        state.tab = Tab::Branches;
+        state.branches = vec![branch_entry("ghost", RefKind::Local, false)];
+        state.branch_selected = 0;
+
+        reduce(&mut state, Action::ToggleExpand, &repo);
+
+        assert!(
+            state.branch_filter.is_none(),
+            "a ref that does not resolve applies no filter"
+        );
+        assert!(state.status.error.is_some(), "the failure is reported");
+        let _ = fs::remove_dir_all(&repo);
+    }
+
+    /// Expanding keeps the row's own top fixed and pushes the rows below it
+    /// down. The selection does not move, and when the panel fits in the
+    /// viewport the scroll offset does not move either — so the list never
+    /// jumps under the reader (T3).
+    #[test]
+    fn expanding_a_row_leaves_scroll_and_selection_alone() {
+        let mut state = state_of(linear(6));
+        // A viewport smaller than the content (so the offset is free to move)
+        // but tall enough for the expanded block.
+        state.status.height = 8;
+        state.selected = 2;
+        state.scroll = 1;
+        let top_before = state.row_top(2);
+        let below_before = state.row_top(3);
+        let height_before = state.row_height(2);
+
+        reduce(&mut state, Action::ToggleExpand, Path::new("."));
+
+        assert!(state.expanded.contains(&2), "the row is open");
+        assert_eq!(state.selected, 2, "the selection stays on the row");
+        assert_eq!(state.scroll, 1, "a panel that fits does not move the view");
+        assert_eq!(
+            state.row_top(2),
+            top_before,
+            "the expanded row keeps its top"
+        );
+        assert!(
+            state.row_height(2) > height_before,
+            "the row grew by its panel"
+        );
+        assert_eq!(
+            state.row_top(3),
+            below_before + (state.row_height(2) - height_before),
+            "only the rows below shift, by exactly the growth"
+        );
+    }
+
+    /// A panel taller than the viewport pulls the view down by just enough to
+    /// reach the block's bottom. This is the one case where expanding moves the
+    /// offset, and it is `ensure_visible` doing it — not the expansion itself
+    /// (T3).
+    #[test]
+    fn an_expansion_taller_than_the_viewport_scrolls_just_enough() {
+        let mut state = state_of(linear(6));
+        state.status.height = 3;
+        state.selected = 2;
+        state.scroll = 1;
+
+        reduce(&mut state, Action::ToggleExpand, Path::new("."));
+
+        let view = state.status.height.max(1);
+        let bottom = state.row_top(2) + state.row_height(2);
+        assert!(state.scroll > 1, "the offset moves: {}", state.scroll);
+        assert!(
+            bottom > state.scroll,
+            "the expanded block is at least partly on screen"
+        );
+        assert!(
+            bottom >= state.scroll + view,
+            "the view is aligned to the block's bottom"
+        );
+    }
+
+    /// Collapsing restores the original geometry exactly (T3).
+    #[test]
+    fn collapsing_a_row_restores_the_geometry() {
+        let mut state = state_of(linear(6));
+        state.selected = 2;
+        let display_before = state.display_rows();
+        let below_before = state.row_top(3);
+
+        state.expanded.insert(2);
+        assert_eq!(state.row_height(2), 1 + EXPANDED_EXTRA_ROWS);
+        assert_eq!(state.display_rows(), display_before + EXPANDED_EXTRA_ROWS);
+
+        state.expanded.remove(&2);
+        assert_eq!(state.row_height(2), 1);
+        assert_eq!(state.display_rows(), display_before);
+        assert_eq!(state.row_top(3), below_before);
+    }
+
+    /// The details panel belongs to exactly the expanded row: a closed row
+    /// reserves nothing, an open one reserves at least the fallback height, and
+    /// a sibling is unaffected (T3).
+    ///
+    /// The mockup draws a `▼` caret on the expanded row; the terminal marks the
+    /// expansion with the panel's own bordered title instead (see the W12
+    /// parity-ledger `UD-` rows).
+    #[test]
+    fn the_details_panel_belongs_to_the_expanded_row() {
+        let mut state = state_of(linear(4));
+        assert_eq!(
+            state.inline_cdv_height(0),
+            0,
+            "a closed row reserves nothing"
+        );
+
+        state.expanded.insert(0);
+        assert_eq!(
+            state.inline_cdv_height(0),
+            EXPANDED_EXTRA_ROWS,
+            "an open row with no panel yet still reserves the fallback"
+        );
+
+        state.cdv = Some(CdvState::loading(
+            0,
+            "c0",
+            crate::cdv::CdvKind::Commit,
+            None,
+        ));
+        assert!(
+            state.inline_cdv_height(0) >= EXPANDED_EXTRA_ROWS,
+            "the loaded panel keeps the row at least the fallback height"
+        );
+        assert_eq!(state.inline_cdv_height(1), 0, "a sibling row is unaffected");
+        assert!(
+            state
+                .cdv
+                .as_ref()
+                .unwrap()
+                .status_line()
+                .contains("Commit Details"),
+            "the panel title names the expansion"
+        );
+    }
+
+    /// Without `$GGT_EDITOR` the `e` key is off: it explains how to turn the
+    /// fallback on and stages nothing (T6).
+    #[test]
+    fn without_an_editor_program_the_key_only_hints() {
+        let repo = temp_repo("editor-off");
+        let mut state = state_of(linear(2));
+        assert!(state.editor_program.is_none(), "the default is off");
+
+        reduce(&mut state, Action::EditorOpen, &repo);
+
+        assert!(state.pending_editor.is_none(), "nothing is launched");
+        assert!(
+            state
+                .status
+                .last_action
+                .as_deref()
+                .unwrap_or_default()
+                .contains("GGT_EDITOR"),
+            "the hint names the variable: {:?}",
+            state.status.last_action
+        );
+        let _ = fs::remove_dir_all(&repo);
+    }
+
+    /// `$GGT_EDITOR` is the switch: unset or blank means the fallback is off,
+    /// and the value is trimmed (T6).
+    #[test]
+    fn the_editor_env_var_turns_the_fallback_on() {
+        // No other test reads `GGT_EDITOR`, so this cannot race a peer.
+        std::env::remove_var(crate::editor::ENV_VAR);
+        assert!(crate::editor::program_from_env().is_none(), "unset is off");
+
+        std::env::set_var(crate::editor::ENV_VAR, "   ");
+        assert!(
+            crate::editor::program_from_env().is_none(),
+            "an exported-but-blank variable is off"
+        );
+
+        std::env::set_var(crate::editor::ENV_VAR, " nvim ");
+        assert_eq!(
+            crate::editor::program_from_env().as_deref(),
+            Some("nvim"),
+            "the value is trimmed"
+        );
+        std::env::remove_var(crate::editor::ENV_VAR);
+    }
+
+    /// With a program set, `e` on a details file stages the two revisions and
+    /// builds `<program> -d <old> <new>`. The launch is only staged — this test
+    /// never spawns a process (T6).
+    #[test]
+    fn the_editor_key_stages_the_argv_without_launching() {
+        let repo = temp_repo("editor-on");
+        let mut state = state_of(data::commits(&repo).expect("commits"));
+        state.editor_program = Some("/bin/true".to_string());
+        state.selected = 0;
+        open_cdv(&mut state, &repo);
+        assert!(
+            state
+                .cdv
+                .as_ref()
+                .and_then(|panel| panel.selected_path())
+                .is_some(),
+            "the panel has a selected file to diff"
+        );
+
+        reduce(&mut state, Action::EditorOpen, &repo);
+
+        let plan = state.pending_editor.as_ref().expect("a launch is staged");
+        assert_eq!(plan.program, "/bin/true");
+        assert_eq!(plan.args[0], "-d", "the shared diff flag");
+        assert_eq!(plan.args.len(), 3, "argv is program, -d, old, new");
+        assert_eq!(
+            std::fs::read_to_string(&plan.old_file).unwrap(),
+            "",
+            "the root commit has no parent, so the old side is empty"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&plan.new_file).unwrap(),
+            "1\n",
+            "the new side is this revision"
+        );
+        assert!(
+            state
+                .status
+                .last_action
+                .as_deref()
+                .unwrap_or_default()
+                .contains("/bin/true -d"),
+            "the status line shows the command: {:?}",
+            state.status.last_action
+        );
+        crate::editor::cleanup(plan);
+        let _ = fs::remove_dir_all(&repo);
+    }
+
+    /// Staging the editor touches only the status line and the pending launch:
+    /// the view the reader comes back to is the one they left (T6). The terminal
+    /// hand-off itself needs a real tty, so it is the pty E2E's job.
+    #[test]
+    fn staging_the_editor_leaves_the_view_untouched() {
+        let repo = temp_repo("editor-resume");
+        let mut state = state_of(data::commits(&repo).expect("commits"));
+        state.editor_program = Some("/bin/true".to_string());
+        state.tab = Tab::Branches;
+        state.selected = 0;
+        state.status.height = 24;
+        open_cdv(&mut state, &repo);
+        // Settle the derived offset first: `reduce` re-runs `ensure_visible` at
+        // its end, and that would move the offset for reasons that have nothing
+        // to do with the editor.
+        state.ensure_visible();
+
+        let view = |state: &AppState| {
+            (
+                state.tab,
+                state.selected,
+                state.scroll,
+                state.expanded.clone(),
+                state.cdv.as_ref().map(|panel| panel.row),
+                state.cdv.as_ref().and_then(|panel| panel.selected_path()),
+            )
+        };
+        let before = view(&state);
+
+        reduce(&mut state, Action::EditorOpen, &repo);
+
+        assert_eq!(
+            view(&state),
+            before,
+            "the view survives the editor round trip"
+        );
+        assert!(
+            state.pending_editor.is_some(),
+            "the launch is staged for the event loop"
+        );
+
+        if let Some(plan) = state.pending_editor.as_ref() {
+            crate::editor::cleanup(plan);
+        }
+        let _ = fs::remove_dir_all(&repo);
+    }
 }
