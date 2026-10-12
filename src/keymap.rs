@@ -295,6 +295,396 @@ pub fn action_for(key: KeyEvent) -> Option<Action> {
     }
 }
 
+/// One row of the user-facing keybinding table (W11/T2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Binding {
+    /// The key or chord, in the conventional `Ctrl+F` / `Shift+Tab` spelling.
+    pub keys: &'static str,
+    /// What the key does.
+    pub action: &'static str,
+    /// When the key applies: the global graph map, an overlay, or a focused pane.
+    pub context: &'static str,
+}
+
+/// The complete user-facing keybinding table.
+///
+/// This is the **single source of truth** for the README's keybindings table
+/// (W11/T2): the binary prints it via `--keybindings`, and
+/// [`tests::readme_keybindings_table_is_generated_from_this_map`] fails if the
+/// README drifts. Adding a binding here without regenerating the README is a
+/// test failure, not silent doc rot.
+pub const BINDINGS: &[Binding] = &[
+    // Global map (`action_for`) — the graph view.
+    Binding {
+        keys: "q",
+        action: "Quit",
+        context: "Graph view",
+    },
+    Binding {
+        keys: "Esc",
+        action: "Quit (or close the open overlay)",
+        context: "Graph view",
+    },
+    Binding {
+        keys: "j",
+        action: "Next commit (table order)",
+        context: "Graph view",
+    },
+    Binding {
+        keys: "k",
+        action: "Previous commit",
+        context: "Graph view",
+    },
+    Binding {
+        keys: "PgDn",
+        action: "Page down",
+        context: "Graph view",
+    },
+    Binding {
+        keys: "PgUp",
+        action: "Page up",
+        context: "Graph view",
+    },
+    Binding {
+        keys: "Home",
+        action: "First commit",
+        context: "Graph view",
+    },
+    Binding {
+        keys: "End",
+        action: "Last commit",
+        context: "Graph view",
+    },
+    Binding {
+        keys: "Right",
+        action: "Follow to the first parent",
+        context: "Graph view",
+    },
+    Binding {
+        keys: "Left",
+        action: "Follow to the first child",
+        context: "Graph view",
+    },
+    Binding {
+        keys: "Enter",
+        action: "Expand / collapse the commit",
+        context: "Graph view",
+    },
+    Binding {
+        keys: "s",
+        action: "Next stash (no Shift = next, R1.2)",
+        context: "Graph view",
+    },
+    Binding {
+        keys: "Shift+s",
+        action: "Previous stash",
+        context: "Graph view",
+    },
+    Binding {
+        keys: "r",
+        action: "Refresh",
+        context: "Graph view",
+    },
+    Binding {
+        keys: "m",
+        action: "Open the context menu for the selection",
+        context: "Graph view",
+    },
+    Binding {
+        keys: "Shift+F10",
+        action: "Open the context menu (menu key)",
+        context: "Graph view",
+    },
+    Binding {
+        keys: "Ctrl+F",
+        action: "Open / close the find widget",
+        context: "Graph view",
+    },
+    Binding {
+        keys: "F3",
+        action: "Find: next match",
+        context: "Graph view",
+    },
+    Binding {
+        keys: "Shift+F3",
+        action: "Find: previous match",
+        context: "Graph view",
+    },
+    Binding {
+        keys: "Alt+C",
+        action: "Find: toggle match case",
+        context: "Graph view",
+    },
+    Binding {
+        keys: "Alt+R",
+        action: "Find: toggle regex mode",
+        context: "Graph view",
+    },
+    Binding {
+        keys: "Alt+D",
+        action: "Find: open the CDV for each match",
+        context: "Graph view",
+    },
+    Binding {
+        keys: "d",
+        action: "Open the commit details view (CDV)",
+        context: "Graph view",
+    },
+    Binding {
+        keys: "u",
+        action: "Open the uncommitted-changes view",
+        context: "Graph view",
+    },
+    Binding {
+        keys: "c",
+        action: "Mark the commit for comparison",
+        context: "Graph view",
+    },
+    Binding {
+        keys: "Tab",
+        action: "Focus / unfocus the CDV file list",
+        context: "Graph view",
+    },
+    Binding {
+        keys: "v",
+        action: "Toggle CDV Tree / List",
+        context: "Graph view",
+    },
+    Binding {
+        keys: "+",
+        action: "Grow the CDV",
+        context: "Graph view",
+    },
+    Binding {
+        keys: "-",
+        action: "Shrink the CDV",
+        context: "Graph view",
+    },
+    Binding {
+        keys: "Ctrl+W",
+        action: "Close the CDV",
+        context: "Graph view",
+    },
+    // Context menu (`menu_nav_for`).
+    Binding {
+        keys: "j",
+        action: "Next item",
+        context: "Context menu",
+    },
+    Binding {
+        keys: "k",
+        action: "Previous item",
+        context: "Context menu",
+    },
+    Binding {
+        keys: "Enter",
+        action: "Activate the item",
+        context: "Context menu",
+    },
+    Binding {
+        keys: "letter",
+        action: "Activate the item by its shortcut",
+        context: "Context menu",
+    },
+    Binding {
+        keys: "Esc",
+        action: "Close the menu",
+        context: "Context menu",
+    },
+    // Find widget (`find_key_for`), while it owns the keyboard.
+    Binding {
+        keys: "character",
+        action: "Append to the query",
+        context: "Find widget",
+    },
+    Binding {
+        keys: "Backspace",
+        action: "Delete the last query character",
+        context: "Find widget",
+    },
+    Binding {
+        keys: "Enter",
+        action: "Next match",
+        context: "Find widget",
+    },
+    Binding {
+        keys: "Shift+Enter",
+        action: "Previous match",
+        context: "Find widget",
+    },
+    Binding {
+        keys: "Esc",
+        action: "Close the find widget",
+        context: "Find widget",
+    },
+    // Dialog (`dialog_key_for`), while it owns the keyboard.
+    Binding {
+        keys: "Enter",
+        action: "Submit the dialog",
+        context: "Dialog",
+    },
+    Binding {
+        keys: "Esc",
+        action: "Cancel the dialog",
+        context: "Dialog",
+    },
+    Binding {
+        keys: "Tab",
+        action: "Next field",
+        context: "Dialog",
+    },
+    Binding {
+        keys: "Shift+Tab",
+        action: "Previous field",
+        context: "Dialog",
+    },
+    Binding {
+        keys: "Left",
+        action: "Move the text cursor",
+        context: "Dialog",
+    },
+    Binding {
+        keys: "Home",
+        action: "Start of the field",
+        context: "Dialog",
+    },
+    Binding {
+        keys: "End",
+        action: "End of the field",
+        context: "Dialog",
+    },
+    Binding {
+        keys: "Backspace",
+        action: "Delete before the cursor",
+        context: "Dialog",
+    },
+    Binding {
+        keys: "Delete",
+        action: "Delete at the cursor",
+        context: "Dialog",
+    },
+    Binding {
+        keys: "Space",
+        action: "Toggle / insert a space",
+        context: "Dialog",
+    },
+    // Pager (`pager_nav_for`), while it owns the keyboard.
+    Binding {
+        keys: "j",
+        action: "Scroll down one line",
+        context: "Pager",
+    },
+    Binding {
+        keys: "k",
+        action: "Scroll up one line",
+        context: "Pager",
+    },
+    Binding {
+        keys: "PgDn",
+        action: "Scroll down one page",
+        context: "Pager",
+    },
+    Binding {
+        keys: "PgUp",
+        action: "Scroll up one page",
+        context: "Pager",
+    },
+    Binding {
+        keys: "Home",
+        action: "Top of the document",
+        context: "Pager",
+    },
+    Binding {
+        keys: "End",
+        action: "Bottom of the document",
+        context: "Pager",
+    },
+    Binding {
+        keys: "q",
+        action: "Close the pager",
+        context: "Pager",
+    },
+    // CDV file list (`cdv_key_for`), only while `Tab` has given it the keyboard.
+    Binding {
+        keys: "j",
+        action: "Next file",
+        context: "CDV file list",
+    },
+    Binding {
+        keys: "k",
+        action: "Previous file",
+        context: "CDV file list",
+    },
+    Binding {
+        keys: "Enter",
+        action: "View diff (A65)",
+        context: "CDV file list",
+    },
+    Binding {
+        keys: "o",
+        action: "View file at revision (A66)",
+        context: "CDV file list",
+    },
+    Binding {
+        keys: "w",
+        action: "View diff with working file (A67)",
+        context: "CDV file list",
+    },
+    Binding {
+        keys: "e",
+        action: "Open file (A68)",
+        context: "CDV file list",
+    },
+    Binding {
+        keys: "Space",
+        action: "Toggle reviewed (A69/A70)",
+        context: "CDV file list",
+    },
+    Binding {
+        keys: "R",
+        action: "Reset file to this revision (A71, gated)",
+        context: "CDV file list",
+    },
+    Binding {
+        keys: "y",
+        action: "Copy absolute path (A72)",
+        context: "CDV file list",
+    },
+    Binding {
+        keys: "Y",
+        action: "Copy relative path (A73)",
+        context: "CDV file list",
+    },
+    Binding {
+        keys: "Left",
+        action: "Collapse folder",
+        context: "CDV file list",
+    },
+    Binding {
+        keys: "Right",
+        action: "Expand folder",
+        context: "CDV file list",
+    },
+];
+
+/// Render [`BINDINGS`] as a GitHub-flavoured markdown table.
+///
+/// `--keybindings` prints this; the README embeds it between the
+/// `KEYBINDINGS:START` / `KEYBINDINGS:END` markers.
+pub fn keybindings_markdown() -> String {
+    let mut out = String::from("| Keys | Action | Context |\n| --- | --- | --- |\n");
+    for binding in BINDINGS {
+        out.push_str("| `");
+        out.push_str(binding.keys);
+        out.push_str("` | ");
+        out.push_str(binding.action);
+        out.push_str(" | ");
+        out.push_str(binding.context);
+        out.push_str(" |\n");
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -593,6 +983,69 @@ mod tests {
         ];
         for (event, expected) in table {
             assert_eq!(pager_nav_for(event), Some(expected));
+        }
+    }
+
+    /// W11/T2: the README's keybindings table is generated from [`BINDINGS`].
+    #[test]
+    fn readme_keybindings_table_is_generated_from_this_map() {
+        let readme = include_str!("../README.md");
+        let start_marker = "<!-- KEYBINDINGS:START -->";
+        let end_marker = "<!-- KEYBINDINGS:END -->";
+        let start = readme
+            .find(start_marker)
+            .expect("README.md is missing the KEYBINDINGS:START marker")
+            + start_marker.len();
+        let end = readme
+            .find(end_marker)
+            .expect("README.md is missing the KEYBINDINGS:END marker");
+        assert!(
+            start <= end,
+            "README.md keybindings markers are out of order"
+        );
+        assert_eq!(
+            readme[start..end].trim(),
+            keybindings_markdown().trim(),
+            "README keybindings table is stale; regenerate with `cargo run -- --keybindings`"
+        );
+    }
+
+    /// Every row must be renderable as one markdown table line, and a key may
+    /// not repeat inside one context.
+    #[test]
+    fn binding_table_is_well_formed() {
+        for binding in BINDINGS {
+            assert!(!binding.keys.is_empty(), "a binding has empty keys");
+            assert!(
+                !binding.action.is_empty(),
+                "binding {:?} has no action",
+                binding.keys
+            );
+            assert!(
+                !binding.context.is_empty(),
+                "binding {:?} has no context",
+                binding.keys
+            );
+            for field in [binding.keys, binding.action, binding.context] {
+                assert!(
+                    !field.contains('|'),
+                    "binding field {field:?} breaks the table"
+                );
+                assert!(
+                    !field.contains('\n'),
+                    "binding field {field:?} has a newline"
+                );
+            }
+        }
+        for pair in BINDINGS.windows(2) {
+            let (a, b) = (&pair[0], &pair[1]);
+            if a.context == b.context {
+                assert_ne!(
+                    a.keys, b.keys,
+                    "duplicate key {:?} in context {:?}",
+                    a.keys, a.context
+                );
+            }
         }
     }
 }

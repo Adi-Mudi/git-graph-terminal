@@ -1,7 +1,7 @@
 name: CI
 
-# P0 T4 skeleton. Activates once this project has a GitHub remote
-# (the repository does not exist yet — escalation item, see p0-report.md).
+# P0 T4 skeleton, filled in by W11/T4. Activates once this project has a GitHub
+# remote (the repository does not exist yet — escalation item, see p0-report.md).
 on:
   push:
     branches: ['**']
@@ -31,16 +31,68 @@ jobs:
             ~/.cargo/git
             target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
+          restore-keys: |
+            ${{ runner.os }}-cargo-
 
       - name: Format check
         run: cargo fmt --check
 
       - name: Lint (clippy, warnings are errors)
-        run: cargo clippy -- -D warnings
+        run: cargo clippy --all-targets -- -D warnings
 
       - name: Test
         run: cargo test
+
+  # W11/T4 — the pty end-to-end run. D4 keeps ALL visual/PTY E2E runs remote-only,
+  # so this is the only place a real pty is allocated. `tools/pty-shot.sh` drives
+  # the TUI over `script(1)` and writes both the raw capture and a deterministic
+  # `--dump` frame; the job then asserts the frame drew the graph at the ladder the
+  # matrix TERM promises.
+  pty-e2e:
+    name: pty E2E (${{ matrix.term }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - term: xterm-256color
+            lang: C.UTF-8
+            caps: plain/256/unicode
+          - term: vt100
+            lang: C
+            caps: plain/16/ascii
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install pty tools (util-linux `script`, binutils `strings`)
+        run: sudo apt-get update && sudo apt-get install -y util-linux binutils
+
+      - name: Build
+        run: cargo build
+
+      - name: Capture the TUI over a pty
+        env:
+          TERM: ${{ matrix.term }}
+          LANG: ${{ matrix.lang }}
+        run: tools/pty-shot.sh "ci-${{ matrix.term }}"
+
+      - name: Assert the capture drew the graph
+        run: |
+          set -euo pipefail
+          frame="target/pty/ci-${{ matrix.term }}.frame"
+          test -s "$frame"
+          grep -q "commits (" "$frame"
+          grep -q "caps: ${{ matrix.caps }}" "$frame"
+          grep -q "graph:" "$frame"
+
+      - name: Upload pty artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: pty-${{ matrix.term }}
+          path: target/pty/
 
 # Not wired here yet (needs the read-only reference checkout, which is not a
 # submodule of this repository): the G8 parity harness.

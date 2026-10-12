@@ -38,6 +38,7 @@ mod menu;
 mod pager;
 mod render;
 mod term;
+mod version;
 
 use std::io::{self, Stdout, Write};
 use std::path::PathBuf;
@@ -64,32 +65,68 @@ use crate::term::ladder::Ladder;
 use crate::term::TermCaps;
 
 /// Restores the terminal on every exit path, including panics.
-struct TerminalGuard;
+///
+/// W11/T1: the guard carries the probe result so it only *leaves* the modes
+/// [`setup_terminal`] actually entered. A Dumb host never got `smcup`, so it is
+/// never sent `rmcup` either.
+struct TerminalGuard {
+    caps: TermCaps,
+}
 
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
-        let _ = restore_terminal();
+        let _ = restore_terminal(&self.caps);
     }
+}
+
+/// Does this probe result allow the alternate screen?
+///
+/// W8 kept `EnterAlternateScreen` unconditional; W11/T1 (the recorded backlog)
+/// skips it on the Dumb tier, where the full-screen TUI is not drawable and the
+/// app falls back to the plain commit list instead. Every other tier keeps the
+/// W8 policy: always alt-screen, always restore.
+fn enters_alt_screen(caps: &TermCaps) -> bool {
+    !caps.dumb
+}
+
+/// Write the enter escapes for `caps` to `out` (raw mode is separate).
+///
+/// Split from [`setup_terminal`] so a test can read the exact byte stream and
+/// assert the Dumb tier emits no `smcup` (`ESC[?1049h`).
+fn write_enter_sequences<W: Write>(out: &mut W, caps: &TermCaps) -> io::Result<()> {
+    if enters_alt_screen(caps) {
+        execute!(out, EnterAlternateScreen)?;
+    }
+    // W8/T3: only ask for SGR mouse reporting when the probe proved the terminal
+    // speaks it. A `dumb`/`vt100` host must never receive the escape — an
+    // unrecognised sequence is printed as literal text on some terminals.
+    if caps.mouse {
+        execute!(out, EnableMouseCapture)?;
+    }
+    Ok(())
+}
+
+/// Write the leave escapes for `caps` to `out` (raw mode is separate).
+fn write_leave_sequences<W: Write>(out: &mut W, caps: &TermCaps) -> io::Result<()> {
+    if enters_alt_screen(caps) {
+        execute!(out, LeaveAlternateScreen)?;
+    }
+    // Disabling a mode that was never enabled is a no-op escape, so the guard
+    // always restores the terminal.
+    execute!(out, DisableMouseCapture)?;
+    Ok(())
 }
 
 fn setup_terminal(caps: &TermCaps) -> io::Result<Terminal<CrosstermBackend<Stdout>>> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
-    // W8/T3: only ask for SGR mouse reporting when the probe proved the terminal
-    // speaks it. A `dumb`/`vt100` host must never receive the escape — an
-    // unrecognised sequence is printed as literal text on some terminals.
-    if caps.mouse {
-        execute!(stdout, EnableMouseCapture)?;
-    }
+    write_enter_sequences(&mut stdout, caps)?;
     Terminal::new(CrosstermBackend::new(stdout))
 }
 
-fn restore_terminal() -> io::Result<()> {
+fn restore_terminal(caps: &TermCaps) -> io::Result<()> {
     disable_raw_mode()?;
-    // Disabling a mode that was never enabled is a no-op escape, so the guard
-    // stays capability-free and always restores the terminal.
-    execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture)?;
+    write_leave_sequences(&mut io::stdout(), caps)?;
     Ok(())
 }
 
@@ -103,6 +140,18 @@ fn main() -> io::Result<()> {
         .find(|a| !a.starts_with('-'))
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."));
+
+    // T3: the release identity, printed before anything touches the repository
+    // (so `--version` works even outside a git checkout).
+    if args.iter().any(|a| a == "--version" || a == "-V") {
+        println!("{}", version::version_line());
+        return Ok(());
+    }
+    // T2: the README keybindings table, generated from `keymap::BINDINGS`.
+    if args.iter().any(|a| a == "--keybindings") {
+        print!("{}", keymap::keybindings_markdown());
+        return Ok(());
+    }
 
     let mut state = if mock {
         AppState::demo()
@@ -121,7 +170,18 @@ fn main() -> io::Result<()> {
     }
     // `--mock` always shows the graph; a real repo hides it for `--text-list`
     // and for `--dump` (so the P0 bordered list frame stays reproducible).
-    let show_graph = mock || !(text_list || dump);
+    let graph_requested = mock || !(text_list || dump);
+    // W11/T1: a Dumb terminal cannot place the cursor, so the full-screen graph
+    // is not drawable. Fall back to the P0 plain list and never enter the
+    // alternate screen. `--dump` is headless (it prints one frame and exits), so
+    // it keeps rendering the requested view for reproducible evidence.
+    if graph_requested && caps.dumb && !dump {
+        eprintln!(
+            "git-graph-terminal: TERM={} is a dumb terminal — falling back to the plain commit list (no alternate screen).",
+            caps.term.as_deref().unwrap_or("-")
+        );
+    }
+    let show_graph = graph_requested && (!caps.dumb || dump);
     // Rows the graph view spends outside the commit body: the status bar, plus
     // the table header the graph pane has no counterpart for.
     let chrome = if show_graph { 2 } else { 1 };
@@ -132,7 +192,7 @@ fn main() -> io::Result<()> {
     }
 
     let mut terminal = setup_terminal(&caps)?;
-    let _guard = TerminalGuard;
+    let _guard = TerminalGuard { caps: caps.clone() };
 
     loop {
         {
@@ -387,4 +447,107 @@ fn dump_frame(state: &AppState, view: &ViewOptions<'_>) -> io::Result<()> {
         writeln!(out, "{}", row.trim_end())?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A probe fixture built from `(key, value)` pairs (no process env).
+    fn caps(pairs: &[(&str, &str)]) -> TermCaps {
+        let pairs: Vec<(String, String)> = pairs
+            .iter()
+            .map(|(key, value)| (key.to_string(), value.to_string()))
+            .collect();
+        TermCaps::detect(move |key| {
+            pairs
+                .iter()
+                .find(|(name, _)| name == key)
+                .map(|(_, value)| value.clone())
+        })
+    }
+
+    /// W11/T1: the Dumb tier must never receive `smcup`/`rmcup`.
+    #[test]
+    fn dumb_tier_never_emits_smcup() {
+        let dumb = caps(&[("TERM", "dumb")]);
+        assert!(dumb.dumb);
+        assert!(!enters_alt_screen(&dumb));
+
+        let mut out = Vec::new();
+        write_enter_sequences(&mut out, &dumb).unwrap();
+        let enter = String::from_utf8(out).unwrap();
+        assert!(
+            !enter.contains("\u{1b}[?1049h"),
+            "Dumb must not enter the alternate screen: {enter:?}"
+        );
+        assert!(
+            !enter.contains("\u{1b}[?1000h"),
+            "Dumb must not enable mouse capture: {enter:?}"
+        );
+
+        let mut out = Vec::new();
+        write_leave_sequences(&mut out, &dumb).unwrap();
+        let leave = String::from_utf8(out).unwrap();
+        assert!(
+            !leave.contains("\u{1b}[?1049l"),
+            "Dumb must not leave an alternate screen it never entered: {leave:?}"
+        );
+    }
+
+    /// W11/T1: every non-Dumb tier keeps W8's always-alt-screen policy.
+    #[test]
+    fn proven_terminal_enters_and_leaves_the_alt_screen() {
+        let xterm = caps(&[("TERM", "xterm-256color"), ("LANG", "en_US.UTF-8")]);
+        assert!(enters_alt_screen(&xterm));
+
+        let mut out = Vec::new();
+        write_enter_sequences(&mut out, &xterm).unwrap();
+        assert!(String::from_utf8(out).unwrap().contains("\u{1b}[?1049h"));
+
+        let mut out = Vec::new();
+        write_leave_sequences(&mut out, &xterm).unwrap();
+        assert!(String::from_utf8(out).unwrap().contains("\u{1b}[?1049l"));
+    }
+
+    /// W11/T1: the fallback still paints the commit list and the dumb ladder.
+    #[test]
+    fn dumb_fallback_still_renders_the_commit_list() {
+        let dumb = caps(&[("TERM", "dumb")]);
+        let ladder = Ladder::from_caps(&dumb);
+        let state = AppState::demo();
+        // The interactive fallback: `--mock` asked for the graph, but Dumb forces
+        // the P0 plain list (`show_graph = false`).
+        let view = make_view(&state, ladder, true, false);
+        let backend = ratatui::backend::TestBackend::new(100, 12);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render::ui(frame, &state, &view))
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let mut text = String::new();
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                text.push_str(buffer[(x, y)].symbol());
+            }
+            text.push('\n');
+        }
+        assert!(
+            text.contains("commits ("),
+            "commit-list header missing:\n{text}"
+        );
+        assert!(
+            text.contains("Add graph renderer widget"),
+            "commit list missing:\n{text}"
+        );
+        assert!(
+            text.contains("caps: plain/mono/dumb"),
+            "status bar must show the dumb ladder:\n{text}"
+        );
+        assert!(
+            !text.contains("lanes:"),
+            "the graph view must not be drawn on Dumb:\n{text}"
+        );
+    }
 }

@@ -1,6 +1,6 @@
 [package]
 name = "git-graph-terminal"
-version = "0.1.0"
+version = "0.3.0"
 edition = "2021"
 description = "Terminal commit-graph viewer (reverse-engineered from VS Code Git Graph)"
 publish = false
