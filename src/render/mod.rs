@@ -57,7 +57,7 @@ use crate::find::FindWidget;
 use crate::layout::types::{GraphLayout, RowIdx};
 use crate::menu::ContextMenu;
 use crate::pager;
-use crate::render::columns::{commits_table_window, text_offset};
+use crate::render::columns::{commits_table_window, text_offset, TableWindow};
 use crate::render::graph_widget::GraphWidget;
 use crate::term::ladder::{self, Dir, Ladder};
 
@@ -982,9 +982,11 @@ fn graph_view(
     frame.render_widget(
         commits_table_window(
             &state.rows,
-            &heights,
-            &visible,
-            leading,
+            TableWindow {
+                heights: &heights,
+                visible: &visible,
+                leading,
+            },
             state.scroll,
             selected.map(|row| row as usize),
             &state.columns,

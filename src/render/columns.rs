@@ -82,13 +82,29 @@ pub fn header(columns: &ColumnState) -> TuiRow<'static> {
     }))
 }
 
+/// The display-row window the table has to reproduce (M4-W12/T1, T4).
+///
+/// The table and [`crate::render::graph_widget::GraphWidget`] must agree on
+/// where every block sits, so the three inputs that decide that travel
+/// together. They mirror the same-named fields on the graph widget.
+#[derive(Debug, Clone, Copy)]
+pub struct TableWindow<'a> {
+    /// The display-row height of every commit row, indexed by row. A block is
+    /// `refs + commit + details + diff`, so a row is usually taller than one
+    /// line.
+    pub heights: &'a [u16],
+    /// The row order the active tab shows. The Branches filter drops the rows it
+    /// excludes, and the table follows that order.
+    pub visible: &'a [RowIdx],
+    /// The rows the inline uncommitted section claims above the first commit
+    /// (T4).
+    pub leading: u16,
+}
+
 /// Build the commit table for a **display-row window**.
 ///
-/// `scroll` is the first display row shown at the top of the body. `heights`
-/// gives the display-row height of every commit row (M4-W12/T1: a block is
-/// `refs + commit + details + diff`), and `leading` reserves the rows the inline
-/// uncommitted section claims above the first commit (T4). `visible` is the row
-/// order the active tab shows — the Branches filter drops rows it excludes.
+/// `scroll` is the first display row shown at the top of the body, and
+/// `window` says how tall every row is and which rows are shown.
 ///
 /// The inline content itself is painted **over** these reserved rows by
 /// [`crate::render::ui`], so this function only has to leave the right number of
@@ -99,14 +115,17 @@ pub fn header(columns: &ColumnState) -> TuiRow<'static> {
 /// row is filled.
 pub fn commits_table_window(
     commits: &[Commit],
-    heights: &[u16],
-    visible: &[RowIdx],
-    leading: u16,
+    window: TableWindow<'_>,
     scroll: u16,
     selected: Option<usize>,
     columns: &ColumnState,
     find: Option<&FindWidget>,
 ) -> Table<'static> {
+    let TableWindow {
+        heights,
+        visible,
+        leading,
+    } = window;
     let mut body: Vec<TuiRow<'static>> = Vec::new();
     let scroll = scroll as u32;
     let mut cursor: u32 = leading as u32;
@@ -320,6 +339,15 @@ mod tests {
         (0..n as RowIdx).collect()
     }
 
+    /// The [`TableWindow`] for a heights / visible / leading triple.
+    fn window<'a>(heights: &'a [u16], visible: &'a [RowIdx], leading: u16) -> TableWindow<'a> {
+        TableWindow {
+            heights,
+            visible,
+            leading,
+        }
+    }
+
     #[test]
     fn table_builds_for_a_slab_of_commits() {
         let rows = vec![
@@ -329,9 +357,23 @@ mod tests {
         let heights = flat_heights(2, &[], 0);
         let visible = all_visible(2);
         let columns = ColumnState::default();
-        let _ = commits_table_window(&rows, &heights, &visible, 0, 0, Some(1), &columns, None);
-        let _ = commits_table_window(&rows, &heights, &visible, 0, 5, None, &columns, None);
-        let _ = commits_table_window(&[], &[], &[], 0, 0, None, &columns, None);
+        let _ = commits_table_window(
+            &rows,
+            window(&heights, &visible, 0),
+            0,
+            Some(1),
+            &columns,
+            None,
+        );
+        let _ = commits_table_window(
+            &rows,
+            window(&heights, &visible, 0),
+            5,
+            None,
+            &columns,
+            None,
+        );
+        let _ = commits_table_window(&[], window(&[], &[], 0), 0, None, &columns, None);
     }
 
     #[test]
@@ -341,9 +383,7 @@ mod tests {
         let visible = all_visible(1);
         let table = commits_table_window(
             &rows,
-            &heights,
-            &visible,
-            3,
+            window(&heights, &visible, 3),
             0,
             None,
             &ColumnState::default(),
@@ -393,9 +433,7 @@ mod tests {
             let heights = flat_heights(3, expanded, 4);
             let table = commits_table_window(
                 &rows,
-                &heights,
-                &visible,
-                0,
+                window(&heights, &visible, 0),
                 0,
                 Some(1),
                 &ColumnState::default(),
