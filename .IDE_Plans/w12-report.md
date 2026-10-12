@@ -6,7 +6,7 @@ Artifacts: `src/app.rs`, `src/branches.rs`, `src/cdv.rs`, `src/diff.rs`, `src/ed
 `src/keymap.rs`, `src/main.rs`, `src/render/{mod,columns,graph_widget}.rs`, `src/term/ladder.rs`,
 `src/uncommitted.rs`, `tests/*`, `.github/workflows/ci.yml`, `.IDE_Plans/parity-ledger.md` §11
 
-12 commits on the branch, 17 files, +5039 / −434.
+14 commits on the branch (13 before this report), 18 files, +5378 / −434.
 
 ## Reply: DONE — the eight tasks
 
@@ -124,15 +124,27 @@ only reason the bug was visible: nothing else in the suite reads the framebuffer
 Before/after frames: `target/pty/w12-overview-mock.frame` (blank rows) vs
 `target/pty/ci-xterm-256color.frame` (populated).
 
-**2. Non-hermetic test — `the_editor_env_var_turns_the_fallback_on` read the ambient
-environment.** Its first assertion was "unset is off", which is only true if the machine
-running the suite has not exported `GGT_EDITOR`. On any developer shell that had, the test
-failed for a reason that had nothing to do with the code — and because Rust test threads
-share one process, the test's `set_var` also leaked an override into every peer test running
-in parallel. Fixed in `1c43a84` by making the test own the variable end to end: it clears it
-before the first assertion, sets it for each case, and clears it again at the end. Verified
-by running the whole suite under a hostile environment — `GGT_EDITOR=nvim TERM=dumb cargo test`
-is green, all five targets.
+**2. Non-hermetic test — the editor tests shared one temp path.** Remote CI run
+`38300733488` (commit `ffb4e01`) went **red** on the job `fmt + clippy + test`:
+`app::tests::the_editor_key_stages_the_argv_without_launching` panicked at `src/app.rs:3991`
+on `unwrap()` of `Err(Os { code: 2, kind: NotFound })` — the staged temp file was gone.
+336 passed, 1 failed; both `pty E2E` jobs passed. `editor::stage` named its files
+`ggt-diff-<pid>-<label>.old/.new`, and every test in one binary shares the pid, so
+`the_editor_key_stages_the_argv_without_launching` (repo `editor-on`) and
+`staging_the_editor_leaves_the_view_untouched` (repo `editor-resume`) — both selecting
+`f.txt` — computed the *same* path. The resume test ends with `editor::cleanup`, which
+deletes both files, so it could delete the other test's file between that test's `stage`
+and its `read_to_string`. It passed locally, and passed on the run before it and the two
+runs after, which is what makes it the clearest case in this wave of a result that depended
+on the machine rather than on the code. Fixed in `39a453c` by keying the name on the *call* —
+a process-wide counter — instead of on the process, so the next caller cannot reintroduce
+it; `two_stages_in_one_process_never_share_a_path` forces the failing interleaving.
+
+The same class, milder, in `the_editor_env_var_turns_the_fallback_on`: its first assertion
+was "unset is off", true only if the machine has not exported `GGT_EDITOR`, and its
+`set_var` leaked into peer tests because Rust test threads share one process. That one was
+already self-owned end to end in `1c43a84` — it clears the variable before the first
+assertion and again at the end.
 
 **3. Ladder violation — the W12 surfaces spelled their box drawing out.** `┌ │ ├ └ ─ ▼ ▶`
 were literals in the new render code, so a terminal below the Unicode rung — `TERM=dumb`, or
@@ -211,15 +223,29 @@ design differences, 60 real gaps.** W12 adds no parity row and closes none.
 
 | Check | Result |
 |---|---|
-| `cargo fmt --check` | **PASS** — no diff |
-| `cargo clippy --all-targets -- -D warnings` | **PASS** — 0 warnings |
-| `cargo test` | **PASS** — **847** tests, 0 failed (353 bin + 353 app_state + 15 golden + 64 integration + 62 perf). W11 was 703; W12 adds 73 |
-| `cargo test` under a hostile env | **PASS** — `GGT_EDITOR=nvim TERM=dumb` green, all five targets |
+| `cargo fmt --check` | **PASS** — local (allowed) and in CI |
+| `cargo clippy --all-targets -- -D warnings` | **PASS** — local (allowed) and in CI |
+| `cargo test` | **PASS** — remote CI run `38311439228`, `fmt + clippy + test` job green. The count (**847**: 353 bin + 353 app_state + 15 golden + 64 integration + 62 perf; W11 was 703, so W12 adds 73) is from a run made before local suite execution was banned on this machine |
+| `cargo test` under a hostile env | **PASS** — `GGT_EDITOR=nvim TERM=dumb` green, all five targets. Local, and run before the ban |
+| Remote CI on this branch | **PASS** — the repository has a remote (`Adi-Mudi/git-graph-terminal`, over SSH), so the P0 escalation about a missing remote is **closed**. Green through `6f5b2be` (run `38311439228`); `39a453c` and this report are committed and awaiting their run. Four runs are recorded below, including the one that was red |
+| pty E2E (remote) | **PASS** — run `38311439228` on `6f5b2be`: `pty E2E (vt100)` and `pty E2E (xterm-256color)` both green, so the two new steps and the ASCII guard run on a real runner |
+| pty E2E (local rehearsal) | **PASS** — both matrix rows, driven exactly as the job drives them, *before* the remote job existed |
 | Mockup conformance | **COMPLETE** — 17/17 rows above |
-| pty E2E (local rehearsal) | **PASS** — both matrix rows, driven exactly as the job drives them |
-| pty E2E (remote) | **NOT RUN** — this branch has no GitHub remote yet (escalation item from P0, unchanged). The two new CI steps were rehearsed locally instead, and the ASCII guard was checked against a frame with a `┌─` row spliced in so it is known to fire |
 
-The local rehearsal is the honest substitute for the remote job, not a claim that CI ran.
+### CI history on this branch
+
+| Run | Commit | Result |
+|---|---|---|
+| `38297846663` | `e5af02a` | **GREEN** — all three jobs (27s / 26s / 27s) |
+| `38300733488` | `ffb4e01` | **FAILED** — job `fmt + clippy + test`: `app::tests::the_editor_key_stages_the_argv_without_launching` panicked at `src/app.rs:3991`, `unwrap()` on `Err(Os { code: 2, kind: NotFound })`; 336 passed / 1 failed. Both `pty E2E` jobs passed. See defect 2 below |
+| `38308943519` | `e7337fb` | **GREEN** — all three jobs (40s / 28s / 26s) |
+| `38311439228` | `6f5b2be` | **GREEN** — all three jobs (31s), including the two new inline-surface pty assertions |
+
+Remote CI has run on every push to this branch. Exactly one run was red, it was red for one
+real defect, and that run is why the editor fix in `39a453c` exists.
+
+The local rehearsal preceded the remote job and is not a substitute for it. The remote suite
+is the gate, and it is green through `6f5b2be`.
 
 ## Rule 12 — plan verification
 
@@ -237,7 +263,7 @@ report's summary of it.
 | T6 `e` → `$GGT_EDITOR` in diff mode, temp files, resume at same view/row/scroll, never a new window | **PASS** | `src/editor.rs`, `run_editor`; no window is ever opened |
 | T7 refs own line, full mouse, ladder respected, dumb tier | **PASS** | refs line + caret column; `the_inline_surfaces_follow_the_glyph_rung` |
 | T8 unit tests per listed area, golden updates with reasons, pty KEYS evidence, `UD-` rows, conformance table, gate | **PASS** | 73 new tests; no golden file changed (none needed — the goldens cover graph layout, which T7 left byte-identical); captures under `target/pty/`; §11 above |
-| Rules: standard lane rules, `data.rs` additive-only, reference tree read-only, `.IDE_Plans` only for §11 + this report, commit incrementally | **PASS** | `src/data.rs` is not in this branch's diff; 12 commits |
+| Rules: standard lane rules, `data.rs` additive-only, reference tree read-only, `.IDE_Plans` only for §11 + this report, commit incrementally | **PASS** | `src/data.rs` is not in this branch's diff; 13 commits plus the W12b editor fix |
 
 Nothing in the plan is unimplemented. Two things the plan did not name and that are recorded
 as deviations rather than silently absorbed:
@@ -260,10 +286,13 @@ as deviations rather than silently absorbed:
   `.gitignore`d; the earlier wave reports are tracked anyway, so this one is force-added to
   match. The W12 plan permits `.IDE_Plans` writes for `parity-ledger.md` §11 and this file
   only, and that is all that was written.
-- **Remote CI is unverified.** The pty E2E job, including the two new steps, has never run
-  on a remote runner because this repository still has no GitHub remote. The local rehearsal
-  covers the greps and the ASCII guard; it does not cover the runner's `script(1)` behaviour
-  or its `TERM` handling.
+- **The remote exists and CI is green.** `origin` is `Adi-Mudi/git-graph-terminal` over SSH,
+  so the P0 escalation about a missing remote is **closed**. CI has run on every push to this
+  branch; the history is under Gate. One run was red — `38300733488` on `ffb4e01` — and it is
+  recorded as defect 2 below rather than omitted.
+- **Local suite execution is banned on this machine.** A local `cargo test` pinned the CPU
+  package at 100.6 °C. Local is now `cargo check` / `cargo clippy` / `cargo fmt --check` only,
+  and every test result in this report comes from CI.
 
 ## Retrospective
 
@@ -283,8 +312,10 @@ as deviations rather than silently absorbed:
 - The inline surfaces were written against a width that could never be non-zero, and no test
   read the framebuffer, so they shipped blank. Building a surface is not the same as painting
   it; only a draw test tells them apart.
-- The editor test asserted "unset is off" while depending on the ambient environment being
-  unset — a test whose result depends on the machine is not a test.
+- Two editor tests shared one temp path because `editor::stage` keyed it on the process id
+  rather than on the call. It passed locally and passed twice in CI before failing, so the
+  suite was flaky rather than broken — the worst kind of red, because it teaches you to
+  re-run instead of to read.
 - Five new surfaces spelled their box drawing out as literals while the rest of the app
   asked the ladder. The convention existed; the new code did not follow it.
 - The first pass at T3 stacked the two columns vertically, which is a different layout from
@@ -296,6 +327,9 @@ as deviations rather than silently absorbed:
   surface with no framebuffer assertion is unverified by construction.
 - Any test that touches a process-global — env var, cwd, signal handler — must own it end to
   end: clear before, set per case, clear after. Assume the machine is hostile.
+- A shared filesystem path is a process-global too. Key temp files on the *call*, never on the
+  pid: a pid is shared by every test in the binary, so two tests that look independent
+  silently share one file.
 - New render code should reach for `GlyphSet` first and never type a box-drawing character;
   a lint or a grep in CI would make the convention mechanical instead of remembered.
 - Diff the render against the mockup's CSS, not against a description of it. The grid versus
