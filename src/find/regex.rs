@@ -111,7 +111,6 @@ enum Node {
 struct Parser<'a> {
     pattern: &'a [char],
     pos: usize,
-    case_insensitive: bool,
 }
 
 impl<'a> Parser<'a> {
@@ -411,7 +410,6 @@ impl Regex {
         let mut parser = Parser {
             pattern: &chars,
             pos: 0,
-            case_insensitive,
         };
         let root = parser.parse_alt()?;
         if parser.pos < chars.len() {
@@ -554,7 +552,7 @@ impl Regex {
                     false
                 }
             }
-            Node::Concat(items) => self.match_concat(items, 0, text, pos, k),
+            Node::Concat(items) => self.match_concat(items, text, pos, k),
             Node::Alt(branches) => {
                 for branch in branches {
                     if self.match_node(branch, text, pos, k) {
@@ -575,7 +573,6 @@ impl Regex {
     fn match_concat(
         &self,
         items: &[Node],
-        index: usize,
         text: &[char],
         pos: usize,
         k: &mut dyn FnMut(usize) -> bool,
@@ -585,7 +582,7 @@ impl Regex {
             Some((head, rest)) => {
                 let mut rest_result = false;
                 self.match_node(head, text, pos, &mut |next| {
-                    rest_result = self.match_concat(rest, index + 1, text, next, k);
+                    rest_result = self.match_concat(rest, text, next, k);
                     rest_result
                 })
             }

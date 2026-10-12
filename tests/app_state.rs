@@ -28,6 +28,12 @@ mod layout;
 /// `crate::render::highlighted` through `columns.rs`, and `render/mod.rs`
 /// declares its own children relative to itself, so including the module file
 /// is both shorter and more faithful than re-exporting pieces by hand.
+///
+/// `main.rs` is deliberately absent, so `ui`, `commit_list`, `graph_view`,
+/// `status_bar` and `glyphs::detect_from_os` look unused from here even though
+/// the binary calls every one of them. Same story for the `#[allow]`s below:
+/// this harness drives a slice of each module, not all of it.
+#[allow(dead_code)]
 #[path = "../src/render/mod.rs"]
 mod render;
 
@@ -46,6 +52,7 @@ mod files;
 #[path = "../src/find/mod.rs"]
 mod find;
 
+#[allow(dead_code)] // `main.rs` is absent, so its `AppState` entry points look unused.
 #[path = "../src/app.rs"]
 mod app;
 // W5: `app.rs` owns the menu lifecycle, so the menu model and the dispatch map

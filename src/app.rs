@@ -29,7 +29,7 @@ use std::collections::HashSet;
 use std::path::Path;
 
 use crate::actions::{self, RefAction};
-use crate::cdv::{self, CdvKind, CdvState};
+use crate::cdv::{CdvKind, CdvState};
 use crate::data::{self, Commit};
 use crate::dialog::{self, Dialog, DialogKey, DialogResult};
 use crate::files;

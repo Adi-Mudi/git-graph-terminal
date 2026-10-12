@@ -202,7 +202,9 @@ pub fn stash_selector(label: &str) -> String {
 }
 
 /// Does one commit row match the pattern? (`findWidget.ts:224-240`.)
-pub fn row_matches(pattern: &Pattern, commit: &Commit, columns: &ColumnState) -> bool {
+///
+/// Private: the widget is the only caller (`recompute`).
+fn row_matches(pattern: &Pattern, commit: &Commit, columns: &ColumnState) -> bool {
     let (heads, remotes, tags, stash) = branch_labels(&commit.refs);
 
     (columns.author && pattern.is_match(&commit.author))

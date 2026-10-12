@@ -374,10 +374,7 @@ impl Dialog {
             _ => {}
         }
 
-        let index = self.focus;
-        let Some(field) = self.fields.get_mut(index) else {
-            return None;
-        };
+        let field = self.fields.get_mut(self.focus)?;
         match (key, &mut field.kind) {
             (DialogKey::Char(c), FieldKind::Text { .. }) => field.insert(c),
             (DialogKey::Backspace, FieldKind::Text { .. }) => field.backspace(),
@@ -901,7 +898,7 @@ mod tests {
 
     #[test]
     fn reset_mode_and_flags_round_trip_into_the_target() {
-        let mut dialog = Dialog::form(
+        let dialog = Dialog::form(
             "Reset",
             vec![],
             vec![

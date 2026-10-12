@@ -49,7 +49,6 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
-use crate::data::Commit;
 use crate::files::{self, FileRow, FileRowKind, FileTree, FileView, GitFileChange, GitFileStatus};
 use crate::layout::types::RowIdx;
 use crate::render::columns::long_date;
