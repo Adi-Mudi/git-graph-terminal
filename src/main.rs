@@ -37,6 +37,7 @@ mod layout;
 mod menu;
 mod pager;
 mod render;
+mod term;
 
 use std::io::{self, Stdout, Write};
 use std::path::PathBuf;
@@ -58,8 +59,9 @@ use crate::app::{
 };
 use crate::dialog::DialogResult;
 use crate::menu::MenuSurface;
-use crate::render::glyphs::GlyphTier;
 use crate::render::ViewOptions;
+use crate::term::ladder::Ladder;
+use crate::term::TermCaps;
 
 /// Restores the terminal on every exit path, including panics.
 struct TerminalGuard;
@@ -70,15 +72,23 @@ impl Drop for TerminalGuard {
     }
 }
 
-fn setup_terminal() -> io::Result<Terminal<CrosstermBackend<Stdout>>> {
+fn setup_terminal(caps: &TermCaps) -> io::Result<Terminal<CrosstermBackend<Stdout>>> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    execute!(stdout, EnterAlternateScreen)?;
+    // W8/T3: only ask for SGR mouse reporting when the probe proved the terminal
+    // speaks it. A `dumb`/`vt100` host must never receive the escape — an
+    // unrecognised sequence is printed as literal text on some terminals.
+    if caps.mouse {
+        execute!(stdout, EnableMouseCapture)?;
+    }
     Terminal::new(CrosstermBackend::new(stdout))
 }
 
 fn restore_terminal() -> io::Result<()> {
     disable_raw_mode()?;
+    // Disabling a mode that was never enabled is a no-op escape, so the guard
+    // stays capability-free and always restores the terminal.
     execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture)?;
     Ok(())
 }
@@ -100,9 +110,15 @@ fn main() -> io::Result<()> {
         AppState::load(&repo)
     };
 
-    // Capability tier + colour come from the environment (G2 minimal ladder).
-    let tier = GlyphTier::detect_from_os();
-    let colour = render::glyphs::colour_enabled_os();
+    // Capability probe (M3-W8): one read of the environment builds the ladder
+    // the whole frame degrades through. `--caps` prints the probe and exits.
+    let caps = TermCaps::detect_from_os();
+    let ladder = Ladder::from_caps(&caps);
+    if args.iter().any(|a| a == "--caps") {
+        println!("{}", caps.summary());
+        println!("ladder={}", ladder.label());
+        return Ok(());
+    }
     // `--mock` always shows the graph; a real repo hides it for `--text-list`
     // and for `--dump` (so the P0 bordered list frame stays reproducible).
     let show_graph = mock || !(text_list || dump);
@@ -111,11 +127,11 @@ fn main() -> io::Result<()> {
     let chrome = if show_graph { 2 } else { 1 };
 
     if dump {
-        let view = make_view(&state, tier, colour, mock, show_graph);
+        let view = make_view(&state, ladder, mock, show_graph);
         return dump_frame(&state, &view);
     }
 
-    let mut terminal = setup_terminal()?;
+    let mut terminal = setup_terminal(&caps)?;
     let _guard = TerminalGuard;
 
     loop {
@@ -126,7 +142,7 @@ fn main() -> io::Result<()> {
             state.status.width = size.width;
             state.status.height = size.height.saturating_sub(chrome).max(1);
 
-            let view = make_view(&state, tier, colour, mock, show_graph);
+            let view = make_view(&state, ladder, mock, show_graph);
             terminal.draw(|frame| render::ui(frame, &state, &view))?;
         }
 
@@ -139,7 +155,7 @@ fn main() -> io::Result<()> {
             width: state.status.width,
             height: screen_height,
         };
-        let view = make_view(&state, tier, colour, mock, show_graph);
+        let view = make_view(&state, ladder, mock, show_graph);
         let hit = render::hit_geometry(&state, &view);
 
         if !event::poll(Duration::from_millis(250))? {
@@ -308,14 +324,12 @@ fn flush_clipboard(state: &mut AppState) -> io::Result<()> {
 /// [`ViewOptions`] for one frame.
 fn make_view<'a>(
     state: &'a AppState,
-    tier: GlyphTier,
-    colour: bool,
+    ladder: Ladder,
     mock: bool,
     show_graph: bool,
 ) -> ViewOptions<'a> {
     let mut view = ViewOptions {
-        tier,
-        colour,
+        ladder,
         ..ViewOptions::TEXT_ONLY
     };
     view.graph = if show_graph {

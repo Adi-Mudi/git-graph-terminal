@@ -54,6 +54,12 @@ mod find;
 // W7/T3: `app.rs` owns the read-only pager overlay, so its module comes along.
 #[path = "../src/pager.rs"]
 mod pager;
+// W8: the renderer degrades through the capability ladder, so the probe and the
+// ladder come along. `term/mod.rs` resolves its own `ladder` child relative to
+// `src/term/`, so the module file is included whole.
+#[allow(dead_code)]
+#[path = "../src/term/mod.rs"]
+mod term;
 
 #[allow(dead_code)] // `main.rs` is absent, so its `AppState` entry points look unused.
 #[path = "../src/app.rs"]

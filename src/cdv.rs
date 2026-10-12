@@ -49,6 +49,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
+use crate::term::ladder::Ladder;
+
 use crate::files::{self, FileRow, FileRowKind, FileTree, FileView, GitFileChange, GitFileStatus};
 use crate::layout::types::RowIdx;
 use crate::render::columns::long_date;
@@ -698,7 +700,9 @@ pub fn panel_height(state: &CdvState, screen_height: u16, status_height: u16) ->
 }
 
 /// Draw the panel (docked to the bottom of `area`).
-pub fn draw(frame: &mut Frame, area: Rect, state: &CdvState, focused: bool) {
+///
+/// The frame follows the ladder, so an ASCII-only terminal gets `+-|`.
+pub fn draw(frame: &mut Frame, area: Rect, state: &CdvState, focused: bool, ladder: Ladder) {
     if area.height == 0 || area.width == 0 {
         return;
     }
@@ -710,6 +714,7 @@ pub fn draw(frame: &mut Frame, area: Rect, state: &CdvState, focused: bool) {
     };
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_set(ladder.border_set())
         .border_style(border)
         .title(format!(" {} ", state.status_line()));
     let inner = block.inner(area);

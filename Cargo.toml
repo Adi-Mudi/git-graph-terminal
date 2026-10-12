@@ -8,4 +8,7 @@ publish = false
 [dependencies]
 crossterm = "0.29.0"
 ratatui = "0.30.2"
+# W8/T2: display width for the wide-glyph alignment guard (already in the tree
+# via ratatui; declared directly because `term::ladder` names it).
+unicode-width = "0.2"
 

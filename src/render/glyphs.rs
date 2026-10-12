@@ -1,21 +1,13 @@
-//! Glyph tables and the capability tier ladder (G2, minimal).
+//! Glyph tables (G2 tables, detection moved to M3).
 //!
-//! Three swappable tables — **Unicode**, **ASCII**, **Dumb** — selected from the
-//! environment by [`GlyphTier::detect`]. This is the G2 *minimal* ladder: M3
-//! replaces it with the full capability detection module; the table shape and
-//! the call sites stay.
+//! Three swappable tables — **Unicode**, **ASCII**, **Dumb**. W8 moved the
+//! *selection* out of this module: [`crate::term::TermCaps`] probes the
+//! environment and [`crate::term::ladder::Ladder`] picks a [`GlyphTier`], so the
+//! renderer never reads the environment itself. The table shape and the call
+//! sites are unchanged from G2.
 //!
-//! Ladder (first match wins):
-//!
-//! 1. `TERM` unset, empty or `dumb` → [`GlyphTier::Dumb`].
-//! 2. `NO_COLOR` set (non-empty) → [`GlyphTier::Ascii`] (conservative, colourless
-//!    environments; M3 narrows this to colour-only).
-//! 3. locale (`LC_ALL` → `LC_CTYPE` → `LANG`) set but not UTF-8 **and** no modern
-//!    terminal hint (`COLORTERM` / `TMUX`) → [`GlyphTier::Ascii`].
-//! 4. otherwise → [`GlyphTier::Unicode`] (box-drawing + rounded arcs).
-//!
-//! `TMUX` and `COLORTERM` are *keep-Unicode* hints: they never downgrade on
-//! their own (tmux and modern terminals pass box-drawing through).
+//! The tables stay pure data: every glyph is one terminal cell wide in a Western
+//! locale (see `term::ladder::guarded_glyphs` for the CJK ambiguous-width guard).
 
 /// Capability tier for glyph selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -151,143 +143,11 @@ impl GlyphTier {
             GlyphTier::Dumb => &DUMB,
         }
     }
-
-    /// Pick a tier from an environment lookup (`env("TERM")` → `Some("xterm")`).
-    pub fn detect<F>(env: F) -> Self
-    where
-        F: Fn(&str) -> Option<String>,
-    {
-        match env("TERM") {
-            None => GlyphTier::Dumb,
-            Some(term) if term.is_empty() || term == "dumb" => GlyphTier::Dumb,
-            Some(_) => {
-                if no_color(&env) {
-                    return GlyphTier::Ascii;
-                }
-                let utf8 = locale(&env).is_some_and(|l| is_utf8_locale(&l));
-                let modern = non_empty(&env, "COLORTERM") || non_empty(&env, "TMUX");
-                if utf8 || modern {
-                    GlyphTier::Unicode
-                } else {
-                    GlyphTier::Ascii
-                }
-            }
-        }
-    }
-
-    /// Pick a tier from the process environment.
-    pub fn detect_from_os() -> Self {
-        Self::detect(|key| std::env::var(key).ok())
-    }
-}
-
-/// Is colour output allowed? (`TERM=dumb`/unset and `NO_COLOR` disable it.)
-pub fn colour_enabled<F>(env: F) -> bool
-where
-    F: Fn(&str) -> Option<String>,
-{
-    match env("TERM") {
-        None => false,
-        Some(term) if term.is_empty() || term == "dumb" => false,
-        Some(_) => !no_color(&env),
-    }
-}
-
-/// Is colour output allowed in this process environment?
-pub fn colour_enabled_os() -> bool {
-    colour_enabled(|key| std::env::var(key).ok())
-}
-
-fn non_empty<F>(env: &F, key: &str) -> bool
-where
-    F: Fn(&str) -> Option<String>,
-{
-    env(key).is_some_and(|value| !value.is_empty())
-}
-
-fn no_color<F>(env: &F) -> bool
-where
-    F: Fn(&str) -> Option<String>,
-{
-    non_empty(env, "NO_COLOR")
-}
-
-fn locale<F>(env: &F) -> Option<String>
-where
-    F: Fn(&str) -> Option<String>,
-{
-    ["LC_ALL", "LC_CTYPE", "LANG"]
-        .into_iter()
-        .find_map(|key| env(key).filter(|value| !value.is_empty()))
-}
-
-fn is_utf8_locale(locale: &str) -> bool {
-    let locale = locale.to_ascii_lowercase();
-    locale.contains("utf-8") || locale.contains("utf8")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
-
-    fn env(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
-        let map: HashMap<String, String> = pairs
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect();
-        move |key: &str| map.get(key).cloned()
-    }
-
-    #[test]
-    fn dumb_term_is_the_lowest_tier() {
-        assert_eq!(GlyphTier::detect(env(&[])), GlyphTier::Dumb);
-        assert_eq!(GlyphTier::detect(env(&[("TERM", "dumb")])), GlyphTier::Dumb);
-        assert_eq!(GlyphTier::detect(env(&[("TERM", "")])), GlyphTier::Dumb);
-    }
-
-    #[test]
-    fn utf8_locale_selects_unicode() {
-        assert_eq!(
-            GlyphTier::detect(env(&[("TERM", "xterm-256color"), ("LANG", "en_US.UTF-8")])),
-            GlyphTier::Unicode
-        );
-    }
-
-    #[test]
-    fn modern_hint_selects_unicode_without_locale() {
-        assert_eq!(
-            GlyphTier::detect(env(&[
-                ("TERM", "xterm-256color"),
-                ("COLORTERM", "truecolor")
-            ])),
-            GlyphTier::Unicode
-        );
-        assert_eq!(
-            GlyphTier::detect(env(&[("TERM", "screen"), ("TMUX", "/tmp/tmux-1000,1,0")])),
-            GlyphTier::Unicode
-        );
-    }
-
-    #[test]
-    fn plain_locale_falls_back_to_ascii() {
-        assert_eq!(
-            GlyphTier::detect(env(&[("TERM", "vt100"), ("LANG", "C")])),
-            GlyphTier::Ascii
-        );
-    }
-
-    #[test]
-    fn no_color_forces_ascii() {
-        assert_eq!(
-            GlyphTier::detect(env(&[
-                ("TERM", "xterm-256color"),
-                ("LANG", "en_US.UTF-8"),
-                ("NO_COLOR", "1"),
-            ])),
-            GlyphTier::Ascii
-        );
-    }
 
     #[test]
     fn tables_are_distinct_and_complete() {
@@ -308,16 +168,5 @@ mod tests {
         assert_eq!(GlyphTier::Unicode.glyphs().head, '◯');
         assert_eq!(GlyphTier::Unicode.glyphs().stash, '◎');
         assert_eq!(GlyphTier::Unicode.glyphs().uncommitted, '┄');
-    }
-
-    #[test]
-    fn colour_follows_no_color_and_dumb() {
-        assert!(colour_enabled(env(&[("TERM", "xterm-256color")])));
-        assert!(!colour_enabled(env(&[("TERM", "dumb")])));
-        assert!(!colour_enabled(env(&[])));
-        assert!(!colour_enabled(env(&[
-            ("TERM", "xterm-256color"),
-            ("NO_COLOR", "1"),
-        ])));
     }
 }

@@ -2,8 +2,9 @@
 //!
 //! Two cells per lane (D8 §3.1), rounded corners, and the special vertex glyphs:
 //! HEAD `◯`, stash `◎`, uncommitted `┄` (grey). Colour comes from
-//! [`GraphLayout::palette`] unless colour output is disabled (`NO_COLOR` /
-//! `TERM=dumb`) or the row is the uncommitted row (always grey).
+//! [`GraphLayout::palette`] quantised through the terminal's [`Ladder`], so a
+//! 256-colour or 16-colour terminal still gets a distinguishable graph and a mono
+//! terminal gets none.
 //!
 //! Row `i` of the layout is painted at display row `i` shifted by `scroll`
 //! (expanded rows occupy more than one display row), so the text-column table
@@ -13,43 +14,30 @@ use std::collections::HashSet;
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::widgets::Widget;
 
 use crate::layout::types::{GraphLayout, RowIdx};
 use crate::render::cell::{build_row, cell_of, graph_cells, vertex_glyph};
-use crate::render::glyphs::GlyphTier;
-
-/// Style applied to the uncommitted-changes row and its path.
-pub const UNCOMMITTED_COLOUR: Color = Color::DarkGray;
+use crate::term::ladder::Ladder;
 
 /// A view over a [`GraphLayout`] for one terminal area.
 #[derive(Debug, Clone, Copy)]
 pub struct GraphWidget<'a> {
     /// The layout to draw.
     pub layout: &'a GraphLayout,
-    /// Glyph capability tier.
-    pub tier: GlyphTier,
+    /// Terminal capability ladder: glyph rung, colour rung, wide-glyph guard.
+    pub ladder: Ladder,
     /// Highlighted row (the list selection).
     pub selected: Option<RowIdx>,
     /// The uncommitted-changes row, if the repository has any.
     pub uncommitted: Option<RowIdx>,
     /// First **display** row shown at `area.y` (expanded rows are taller than one).
     pub scroll: u16,
-    /// Emit colours? (`false` for `NO_COLOR` / `TERM=dumb`.)
-    pub colour: bool,
     /// Rows whose details are expanded (they reserve `detail_rows` extra rows).
     pub expanded: &'a HashSet<RowIdx>,
     /// Extra terminal rows a single expanded row occupies (W4 gap; W5 CDV).
     pub detail_rows: u16,
-}
-
-impl GraphWidget<'_> {
-    /// Palette colour for a layout colour index.
-    fn colour_of(&self, idx: u8) -> Color {
-        let (r, g, b) = self.layout.palette[(idx as usize) % self.layout.palette.len()];
-        Color::Rgb(r, g, b)
-    }
 }
 
 impl Widget for GraphWidget<'_> {
@@ -81,18 +69,25 @@ impl Widget for GraphWidget<'_> {
             let y = area.y + top as u16;
             let uncommitted = self.uncommitted == Some(row.row);
             let selected = self.selected == Some(row.row);
-            let built = build_row(row, self.layout.max_lane, self.tier, uncommitted);
+            let glyphs = self.ladder.glyphs();
+            let built = build_row(
+                row,
+                self.layout.max_lane,
+                self.ladder.glyph_tier(),
+                uncommitted,
+            );
 
             for (col, cell) in built.cells.iter().enumerate() {
                 if col >= width {
                     break;
                 }
                 let mut style = Style::default();
-                if self.colour {
-                    style = match built.colours[col] {
-                        Some(idx) => style.fg(self.colour_of(idx)),
-                        None => style.fg(UNCOMMITTED_COLOUR),
-                    };
+                let colour = match built.colours[col] {
+                    Some(idx) => self.ladder.colour_of(&self.layout.palette, idx),
+                    None => self.ladder.uncommitted_colour(),
+                };
+                if let Some(colour) = colour {
+                    style = style.fg(colour);
                 }
                 if selected {
                     style = style.add_modifier(Modifier::REVERSED);
@@ -106,16 +101,19 @@ impl Widget for GraphWidget<'_> {
             if let Some(vertex) = &row.vertex {
                 let col = cell_of(vertex.lane);
                 if col < width {
-                    let glyph = vertex_glyph(vertex, self.tier.glyphs(), uncommitted);
+                    let glyph = vertex_glyph(vertex, glyphs, uncommitted);
                     let mut style = Style::default();
-                    if self.colour {
-                        style = if uncommitted {
-                            style.fg(UNCOMMITTED_COLOUR)
-                        } else {
-                            style
-                                .fg(self.colour_of(vertex.colour_idx))
-                                .add_modifier(Modifier::BOLD)
-                        };
+                    let colour = if uncommitted {
+                        self.ladder.uncommitted_colour()
+                    } else {
+                        self.ladder
+                            .colour_of(&self.layout.palette, vertex.colour_idx)
+                    };
+                    if let Some(colour) = colour {
+                        style = style.fg(colour);
+                        if !uncommitted {
+                            style = style.add_modifier(Modifier::BOLD);
+                        }
                     }
                     if selected {
                         style = style.add_modifier(Modifier::REVERSED);
@@ -149,14 +147,17 @@ impl Widget for GraphWidget<'_> {
                             break;
                         }
                         let mut style = Style::default();
-                        if self.colour {
-                            style = style.fg(self.colour_of(segment.colour_idx));
+                        if let Some(colour) = self
+                            .ladder
+                            .colour_of(&self.layout.palette, segment.colour_idx)
+                        {
+                            style = style.fg(colour);
                         }
                         if selected {
                             style = style.add_modifier(Modifier::REVERSED);
                         }
                         buf[(area.x + col as u16, gap_y)]
-                            .set_char(self.tier.glyphs().vertical)
+                            .set_char(glyphs.vertical)
                             .set_style(style);
                     }
                 }
@@ -168,8 +169,9 @@ impl Widget for GraphWidget<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::render::glyphs::GlyphTier;
     use crate::render::mock::demo_layout;
+    use crate::term::ladder::ColourTier;
+    use ratatui::style::Color;
 
     fn lines(widget: GraphWidget<'_>, width: u16, height: u16) -> Vec<String> {
         let area = Rect::new(0, 0, width, height);
@@ -192,11 +194,10 @@ mod tests {
         let expanded = HashSet::new();
         let widget = GraphWidget {
             layout: &layout,
-            tier: GlyphTier::Unicode,
+            ladder: Ladder::unlimited(),
             selected: None,
             uncommitted: Some(0),
             scroll: 0,
-            colour: true,
             expanded: &expanded,
             detail_rows: 0,
         };
@@ -214,11 +215,10 @@ mod tests {
         let expanded = HashSet::new();
         let widget = GraphWidget {
             layout: &layout,
-            tier: GlyphTier::Ascii,
+            ladder: Ladder::mono_ascii(),
             selected: None,
             uncommitted: None,
             scroll: 1,
-            colour: false,
             expanded: &expanded,
             detail_rows: 0,
         };
@@ -233,11 +233,10 @@ mod tests {
         let expanded = HashSet::new();
         let widget = GraphWidget {
             layout: &layout,
-            tier: GlyphTier::Unicode,
+            ladder: Ladder::unlimited().with_colour(ColourTier::Mono),
             selected: Some(1),
             uncommitted: None,
             scroll: 0,
-            colour: false,
             expanded: &expanded,
             detail_rows: 0,
         };
@@ -258,11 +257,10 @@ mod tests {
         let expanded = HashSet::new();
         let widget = GraphWidget {
             layout: &layout,
-            tier: GlyphTier::Unicode,
+            ladder: Ladder::unlimited(),
             selected: None,
             uncommitted: None,
             scroll: 1,
-            colour: true,
             expanded: &expanded,
             detail_rows: 0,
         };
@@ -279,11 +277,10 @@ mod tests {
         let expanded = HashSet::new();
         let widget = GraphWidget {
             layout: &layout,
-            tier: GlyphTier::Unicode,
+            ladder: Ladder::unlimited().with_colour(ColourTier::Mono),
             selected: None,
             uncommitted: None,
             scroll: 0,
-            colour: false,
             expanded: &expanded,
             detail_rows: 0,
         };
@@ -300,11 +297,10 @@ mod tests {
         expanded.insert(2);
         let widget = GraphWidget {
             layout: &layout,
-            tier: GlyphTier::Unicode,
+            ladder: Ladder::unlimited(),
             selected: None,
             uncommitted: Some(0),
             scroll: 0,
-            colour: true,
             expanded: &expanded,
             detail_rows: 4,
         };

@@ -31,6 +31,9 @@ pub mod glyphs;
 pub mod graph_widget;
 #[path = "../src/render/mock.rs"]
 pub mod mock;
+/// W8: `graph_widget` now degrades through `term::ladder`.
+#[path = "../src/term/mod.rs"]
+pub mod term;
 
 mod render {
     pub use crate::{cell, glyphs, graph_widget, mock};
@@ -45,8 +48,8 @@ use std::time::Instant;
 use layout::{layout, LayoutOpts};
 use ratatui::backend::TestBackend;
 use ratatui::Terminal;
-use render::glyphs::GlyphTier;
 use render::graph_widget::GraphWidget;
+use term::ladder::{ColourTier, Ladder};
 
 /// Trunk commits to generate (must be divisible by [`CHUNK`]).
 const COMMITS: usize = 30_000;
@@ -127,11 +130,10 @@ fn render_viewport_ms(graph: &layout::GraphLayout) -> u128 {
             frame.render_widget(
                 GraphWidget {
                     layout: graph,
-                    tier: GlyphTier::Unicode,
+                    ladder: Ladder::unlimited().with_colour(ColourTier::Mono),
                     selected: None,
                     uncommitted: None,
                     scroll: 0,
-                    colour: false,
                     expanded: &HashSet::new(),
                     detail_rows: 0,
                 },

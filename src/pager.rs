@@ -22,6 +22,8 @@ use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
+use crate::term::ladder::Ladder;
+
 /// A modal, scrollable view of captured command output.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Pager {
@@ -103,17 +105,24 @@ pub fn viewport(screen_height: u16) -> u16 {
 /// Draw the pager as a modal overlay covering `area`.
 ///
 /// The caller renders it **last** (after the dialog), so while it is open it is
-/// the top-most layer and the event loop routes every key to it.
-pub fn draw(frame: &mut Frame, area: Rect, pager: &Pager) {
+/// the top-most layer and the event loop routes every key to it. The frame and
+/// the hint separator follow the ladder.
+pub fn draw(frame: &mut Frame, area: Rect, pager: &Pager, ladder: Ladder) {
     if area.height == 0 || area.width == 0 {
         return;
     }
     frame.render_widget(Clear, area);
+    let hint = format!(
+        " j/k scroll {} PgUp/PgDn page {} Esc close ",
+        ladder.separator(),
+        ladder.separator()
+    );
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_set(ladder.border_set())
         .border_style(Style::default().fg(Color::Cyan))
         .title(format!(" {} ", pager.status_line()))
-        .title_bottom(Line::from(" j/k scroll · PgUp/PgDn page · Esc close ").centered());
+        .title_bottom(Line::from(hint).centered());
     let inner = block.inner(area);
     frame.render_widget(block, area);
 

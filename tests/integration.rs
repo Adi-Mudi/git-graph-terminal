@@ -36,6 +36,11 @@ pub mod glyphs;
 pub mod graph_widget;
 #[path = "../src/render/mock.rs"]
 pub mod mock;
+/// W8: the renderer now degrades through `term::ladder`, so the probe and the
+/// ladder come along. `term/mod.rs` resolves its own `ladder` child relative to
+/// `src/term/`, so the whole module file is included rather than the pieces.
+#[path = "../src/term/mod.rs"]
+pub mod term;
 
 mod render {
     pub use crate::{cell, glyphs, graph_widget, mock};
@@ -53,8 +58,8 @@ use data::Commit;
 use layout::{layout, GraphLayout, LayoutOpts};
 use ratatui::backend::TestBackend;
 use ratatui::Terminal;
-use render::glyphs::GlyphTier;
 use render::graph_widget::GraphWidget;
+use term::ladder::{ColourTier, Ladder};
 
 /// Run `make-fixtures.sh` at most once per test process.
 static FIXTURES: Once = Once::new();
@@ -226,11 +231,10 @@ fn render_to_text(graph: &GraphLayout) -> String {
             frame.render_widget(
                 GraphWidget {
                     layout: graph,
-                    tier: GlyphTier::Unicode,
+                    ladder: Ladder::unlimited().with_colour(ColourTier::Mono),
                     selected: None,
                     uncommitted: None,
                     scroll: 0,
-                    colour: false,
                     expanded: &HashSet::new(),
                     detail_rows: 0,
                 },

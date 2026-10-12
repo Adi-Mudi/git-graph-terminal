@@ -30,6 +30,11 @@
 //!
 //! Overlays are drawn in the order the reference stacks them: CDV (z-index 20),
 //! find widget (21), dialog (41), context menu (51).
+//!
+//! W8 adds the **capability ladder**: [`ViewOptions::ladder`] carries the
+//! terminal's proven colour/glyph/frame rungs (built by [`crate::term`]), and
+//! every drawing routine degrades through it. This module never reads the
+//! environment.
 
 pub mod cell;
 pub mod columns;
@@ -51,8 +56,8 @@ use crate::layout::types::{GraphLayout, RowIdx};
 use crate::menu::ContextMenu;
 use crate::pager;
 use crate::render::columns::{commits_table_window, text_offset};
-use crate::render::glyphs::GlyphTier;
 use crate::render::graph_widget::GraphWidget;
+use crate::term::ladder::{self, Dir, Ladder};
 
 /// One `│` row for the uncommitted entry and one for the status bar.
 const STATUS_HEIGHT: u16 = 1;
@@ -80,10 +85,9 @@ const MIN_TEXT_WIDTH: u16 = 24;
 pub struct ViewOptions<'a> {
     /// The graph layout to draw on the left, or `None` for the text-only list.
     pub graph: Option<&'a GraphLayout>,
-    /// Glyph capability tier (from `TERM`/locale/`NO_COLOR`).
-    pub tier: GlyphTier,
-    /// Emit colours?
-    pub colour: bool,
+    /// Terminal capability ladder (colour + glyph + frame rungs) from
+    /// [`crate::term`]. The renderer consumes this and never raw env.
+    pub ladder: Ladder,
     /// Row index of the uncommitted-changes entry, if any.
     pub uncommitted: Option<RowIdx>,
 }
@@ -92,8 +96,7 @@ impl ViewOptions<'_> {
     /// The P0 text-only view (used when no layout is available).
     pub const TEXT_ONLY: ViewOptions<'static> = ViewOptions {
         graph: None,
-        tier: GlyphTier::Unicode,
-        colour: true,
+        ladder: Ladder::unlimited(),
         uncommitted: None,
     };
 }
@@ -114,24 +117,24 @@ pub fn ui(frame: &mut Frame, state: &AppState, view: &ViewOptions<'_>) {
     }
     // The docked CDV sits directly above the status bar (`#cdv.docked`).
     if let Some(panel) = &state.cdv {
-        cdv::draw(frame, chunks[1], panel, state.cdv_focused);
+        cdv::draw(frame, chunks[1], panel, state.cdv_focused, view.ladder);
     }
     if state.find.visible {
-        find_bar(frame, chunks[2], &state.find);
+        find_bar(frame, chunks[2], &state.find, view.ladder);
     }
     status_bar(frame, chunks[3], state, view);
     // A modal dialog blocks the whole window; the context menu still stacks on
     // top of it so the two never fight over the same rows.
     if let Some(dialog) = &state.dialog {
-        dialog_popup(frame, dialog, frame.area());
+        dialog_popup(frame, dialog, frame.area(), view.ladder);
     }
     if let Some(menu) = &state.menu {
-        context_menu(frame, menu, frame.area());
+        context_menu(frame, menu, frame.area(), view.ladder);
     }
     // The pager is the top-most layer: it covers the whole window, including the
     // status bar, and the event loop routes every key to it while it is open.
     if let Some(pager) = &state.pager {
-        pager::draw(frame, frame.area(), pager);
+        pager::draw(frame, frame.area(), pager, view.ladder);
     }
 }
 
@@ -168,8 +171,9 @@ pub fn overlay_rows(state: &AppState, screen_height: u16) -> OverlayRows {
 /// The find widget's bar, pinned to the top right of `area`.
 ///
 /// Width is clamped so a narrow terminal still shows the box rather than
-/// clipping it off the left edge.
-pub fn find_bar(frame: &mut Frame, area: Rect, find: &FindWidget) {
+/// clipping it off the left edge. The frame and the cursor block follow the
+/// ladder, so an ASCII-only terminal gets `+-|` and `_`.
+pub fn find_bar(frame: &mut Frame, area: Rect, find: &FindWidget, ladder: Ladder) {
     if area.height == 0 || area.width == 0 {
         return;
     }
@@ -190,6 +194,7 @@ pub fn find_bar(frame: &mut Frame, area: Rect, find: &FindWidget) {
     let title = format!(" {} ", find.status_line());
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_set(ladder.border_set())
         .border_style(border)
         .title(title);
     let inner = block.inner(rect);
@@ -201,7 +206,7 @@ pub fn find_bar(frame: &mut Frame, area: Rect, find: &FindWidget) {
     // The reference draws the toggles as `Aa` / `.*` / `cdv` buttons
     // (`#findCaseSensitive`, `#findIsRegex`, `#findOpenCommitDetailsView`); a
     // terminal shows the same flags as bracketed markers plus a caret.
-    let mut spans = vec![Span::raw(format!("{}\u{2588}", find.text))];
+    let mut spans = vec![Span::raw(format!("{}{}", find.text, ladder.caret()))];
     if find.case_sensitive {
         spans.push(Span::styled(" [Aa]", Style::default().fg(Color::Yellow)));
     }
@@ -221,11 +226,11 @@ pub fn find_bar(frame: &mut Frame, area: Rect, find: &FindWidget) {
 }
 
 /// The modal dialog, centred like `.dialog` (`web/styles/dialog.css:1-16`).
-pub fn dialog_popup(frame: &mut Frame, dialog: &Dialog, screen: Rect) {
+pub fn dialog_popup(frame: &mut Frame, dialog: &Dialog, screen: Rect, ladder: Ladder) {
     if screen.height == 0 || screen.width == 0 {
         return;
     }
-    let rows = dialog_rows(dialog) as u16;
+    let rows = dialog_rows(dialog, ladder) as u16;
     let height = rows.min(screen.height);
     let width = screen.width.min(64).max(screen.width.min(30));
     let rect = Rect {
@@ -238,25 +243,27 @@ pub fn dialog_popup(frame: &mut Frame, dialog: &Dialog, screen: Rect) {
 
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_set(ladder.border_set())
         .border_style(Style::default().fg(Color::Cyan))
         .title(format!(" {} ", dialog.title));
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
 
-    let lines = dialog_lines(dialog);
+    let lines = dialog_lines(dialog, ladder);
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
 /// How many terminal rows [`dialog_popup`] needs (body + fields + buttons + border).
-fn dialog_rows(dialog: &Dialog) -> usize {
-    dialog_lines(dialog).len().saturating_add(2).max(3)
+fn dialog_rows(dialog: &Dialog, ladder: Ladder) -> usize {
+    dialog_lines(dialog, ladder).len().saturating_add(2).max(3)
 }
 
 /// The dialog's body, field list and button strip, in draw order.
 ///
 /// Kept separate from the widget so the layout maths and the text can both be
-/// asserted in tests without a terminal.
-fn dialog_lines(dialog: &Dialog) -> Vec<Line<'static>> {
+/// asserted in tests without a terminal. The focused-field pointer follows the
+/// ladder (`▸` → `>`).
+fn dialog_lines(dialog: &Dialog, ladder: Ladder) -> Vec<Line<'static>> {
     let dim = Style::default().fg(Color::DarkGray);
     let mut lines: Vec<Line<'static>> = Vec::new();
     for body in &dialog.body {
@@ -264,7 +271,7 @@ fn dialog_lines(dialog: &Dialog) -> Vec<Line<'static>> {
     }
     for (index, field) in dialog.fields.iter().enumerate() {
         let focusable = dialog.focused_field().map(|f| f.name.as_str()) == Some(&field.name);
-        let marker = if focusable { "\u{25b8}" } else { " " };
+        let marker = if focusable { ladder.pointer() } else { ' ' };
         let style = if focusable {
             Style::default().fg(Color::Yellow)
         } else {
@@ -371,10 +378,12 @@ pub fn hit_geometry(state: &AppState, view: &ViewOptions<'_>) -> Option<HitGeome
 
 /// Draw an open context menu as a bordered popup with a highlighted row.
 ///
-/// Check/radio rows render a leading `✓`, disabled rows render dim, and every row
-/// shows its inventory id (`A11`..`A73`) so a capture of the popup can be grepped
-/// against the W5 inventory (see `the_popup_draws_the_surface_title_and_every_inventory_id`).
-pub fn context_menu(frame: &mut Frame, menu: &ContextMenu, screen: Rect) {
+/// Check/radio rows render a leading `✓` (ASCII `x` on a degraded ladder),
+/// disabled rows render dim, and every row shows its inventory id (`A11`..`A73`)
+/// so a capture of the popup can be grepped against the W5 inventory (see
+/// `the_popup_draws_the_surface_title_and_every_inventory_id`). Labels are padded
+/// by **display cells**, so a CJK label cannot shift the id/shortcut columns.
+pub fn context_menu(frame: &mut Frame, menu: &ContextMenu, screen: Rect, ladder: Ladder) {
     let rect = menu.rect(screen);
     frame.render_widget(Clear, rect);
 
@@ -388,12 +397,13 @@ pub fn context_menu(frame: &mut Frame, menu: &ContextMenu, screen: Rect) {
         .iter()
         .enumerate()
         .map(|(index, item)| {
-            let marker = if item.checked { "✓" } else { " " };
+            let marker = if item.checked { ladder.checked() } else { ' ' };
             let shortcut = item
                 .shortcut
                 .map(|key| format!("({key})"))
                 .unwrap_or_default();
-            let text = format!(" {marker} {} {:<34} {:>4} ", item.id, item.label, shortcut);
+            let label = ladder::pad_cells(item.label, 34);
+            let text = format!(" {marker} {} {label} {:>4} ", item.id, shortcut);
             let style = if !item.enabled {
                 off
             } else if index == menu.selected {
@@ -407,6 +417,7 @@ pub fn context_menu(frame: &mut Frame, menu: &ContextMenu, screen: Rect) {
 
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_set(ladder.border_set())
         .border_style(Style::default().fg(Color::Cyan))
         .title(format!(" {} ", menu.surface.title()));
     frame.render_widget(Paragraph::new(lines).block(block), rect);
@@ -499,11 +510,10 @@ fn graph_view(
     frame.render_widget(
         GraphWidget {
             layout,
-            tier: view.tier,
+            ladder: view.ladder,
             selected,
             uncommitted: view.uncommitted,
             scroll: state.scroll,
-            colour: view.colour,
             expanded: &state.expanded,
             detail_rows: EXPANDED_EXTRA_ROWS,
         },
@@ -553,6 +563,11 @@ pub fn status_bar(frame: &mut Frame, area: Rect, state: &AppState, view: &ViewOp
     spans.push(Span::styled(state.status.commits.to_string(), yellow));
     spans.push(Span::styled("  branches: ", dim));
     spans.push(Span::raw(state.status.branches.to_string()));
+    // W8: the capability ladder this frame was drawn with. Kept high in the line
+    // because the trailing hints are long enough to run off a normal terminal,
+    // and a pty capture must always show which rung the host got.
+    spans.push(Span::styled("  caps: ", dim));
+    spans.push(Span::raw(view.ladder.label()));
 
     if let Some(layout) = view.graph {
         // The last action comes first inside the graph block: the trailing
@@ -581,8 +596,15 @@ pub fn status_bar(frame: &mut Frame, area: Rect, state: &AppState, view: &ViewOp
         if area.width < graph_width(layout) as u16 + MIN_TEXT_WIDTH {
             spans.push(Span::styled("  (narrow: text clipped)", dim));
         }
+        let up = view.ladder.arrow(Dir::Up);
+        let down = view.ladder.arrow(Dir::Down);
+        let left = view.ladder.arrow(Dir::Left);
+        let right = view.ladder.arrow(Dir::Right);
+        let dot = view.ladder.separator();
         spans.push(Span::styled(
-            "  panes: j/k/↑/↓ · ←/→ branch · Enter expand · PgUp/PgDn · s/S stash · m/F10 menu · right-click menu · r reload · q quit",
+            format!(
+                "  panes: j/k/{up}/{down} {dot} {left}/{right} branch {dot} Enter expand {dot} PgUp/PgDn {dot} s/S stash {dot} m/F10 menu {dot} right-click menu {dot} r reload {dot} q quit"
+            ),
             dim,
         ));
     } else {
@@ -643,7 +665,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = frame.area();
-                context_menu(frame, menu, area);
+                context_menu(frame, menu, area, Ladder::unlimited());
             })
             .unwrap_or_else(|e: std::convert::Infallible| match e {});
         let buffer = terminal.backend().buffer();
