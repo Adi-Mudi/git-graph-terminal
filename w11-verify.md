@@ -132,3 +132,17 @@ But the release gate itself does not work: the pty-e2e job's central assertion c
 
 VERDICT: REJECT (blocking defects: 1, minor: 3)
 
+## Re-verification (fix commit 4e82534)
+
+Reviewer: independent (not the author). Scope: fix commit 4e82534 only.
+Prior verdict: REJECT (D1 blocking CI assertion + D3/D4/D5 minor doc). All four items re-checked below.
+
+- **D1 (blocking CI assertion)** — **FIXED / CONFIRMED.** `ci.yml` now asserts `grep -q "commits:"` (colon). No active `commits (` grep remains (the paren form appears only in a code comment explaining why it is unsatisfiable). CI-equivalent pty-shot capture under `env -i` for both matrix entries, then the exact `set -euo pipefail` assertion block:
+  - `TERM=xterm-256color LANG=C.UTF-8`: frame line 12 matched — `commits: 8 ... caps: plain/256/unicode/mouse ... graph:` → all 3 greps PASS.
+  - `TERM=vt100 LANG=C`: frame line 12 matched — `commits: 8 ... caps: plain/16/ascii ... graph: 4 cols` → all 3 greps PASS.
+- **D3 (gate row hash)** — **FIXED.** Gate row now reads `git-graph-terminal 0.3.0 (a66b801)` (line 123). Remaining `0d52cc4` mentions are the legitimate base-commit references (lines 3, 71, 79), not the gate row.
+- **D4 (CI-written disclosure)** — **FIXED.** Report line 108 contains the disclosure sentence: "CI is written but NEVER EXECUTED" with the no-remote / local-only explanation.
+- **D5 (row count)** — **FIXED.** Report line 47 states `keymap::BINDINGS` (69 rows).
+- **Gate** — **PASS.** `cargo test` exit 0: 282 + 282 + 15 + 63 + 61 = **703 passed, 0 failed**. `cargo fmt --check` PASS. `cargo clippy --all-targets -- -D warnings` exit 0, **0 warnings**.
+
+VERDICT: ACCEPT
