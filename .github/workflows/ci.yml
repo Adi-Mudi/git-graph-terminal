@@ -58,9 +58,11 @@ jobs:
           - term: xterm-256color
             lang: C.UTF-8
             caps: plain/256/unicode
+            rung: unicode
           - term: vt100
             lang: C
             caps: plain/16/ascii
+            rung: ascii
     steps:
       - uses: actions/checkout@v4
 
@@ -90,6 +92,70 @@ jobs:
           grep -q "commits:" "$frame"
           grep -q "caps: ${{ matrix.caps }}" "$frame"
           grep -q "graph:" "$frame"
+
+      # M4-W12 — the inline surfaces the mockup added. `--dump --mock` is
+      # headless and byte-stable, so every grep here is deterministic. Each
+      # glyph comes from the capability ladder, so the vt100 row asserts the
+      # ASCII fallbacks rather than the box-drawing forms.
+      - name: Assert the W12 inline surfaces
+        run: |
+          set -euo pipefail
+          frame="target/pty/ci-${{ matrix.term }}.frame"
+
+          # T1 — the tab bar.
+          grep -q "1 Overview" "$frame"
+          grep -q "2 Branches" "$frame"
+
+          # T4/T7 — the uncommitted block, its summary line and its tree rows.
+          grep -q "Uncommitted Changes (3)" "$frame"
+          grep -q "staged 2" "$frame"
+          grep -q "src/render/ui.rs" "$frame"
+          grep -q "src/legacy/panel.rs" "$frame"
+
+          if [[ "${{ matrix.rung }}" == "ascii" ]]; then
+            grep -q "v Uncommitted Changes" "$frame"
+            grep -q "+- M src/render/ui.rs" "$frame"
+            grep -q "+ refs | HEAD -> main" "$frame"
+            # No W12 surface may still be box drawing at this rung.
+            if grep -q '[┌│├└─▼▶]' "$frame"; then
+              echo "box drawing survived at the ASCII rung:" >&2
+              grep -n '[┌│├└─▼▶]' "$frame" >&2
+              exit 1
+            fi
+          else
+            grep -q "▼ Uncommitted Changes" "$frame"
+            grep -q "┌─ M src/render/ui.rs" "$frame"
+            grep -q "┌ refs │ HEAD -> main" "$frame"
+          fi
+
+      # Q1 — `Enter` expands the HEAD row and paints the details pane inline.
+      # `--dump` renders the collapsed frame only, so an expanded row needs a
+      # real pty. This capture runs against the checkout itself (`MOCK=0`): the
+      # mock fixture has no repository behind it, so `git show` there fails and
+      # the pane would paint its error state instead of a loaded one.
+      - name: Capture the expanded HEAD row over a pty
+        env:
+          TERM: ${{ matrix.term }}
+          LANG: ${{ matrix.lang }}
+          MOCK: "0"
+          KEYS: enter
+        run: tools/pty-shot.sh "ci-${{ matrix.term }}-expanded"
+
+      - name: Assert the details pane painted inline
+        run: |
+          set -euo pipefail
+          shot="target/pty/ci-${{ matrix.term }}-expanded.txt"
+          test -s "$shot"
+          grep -q "Commit Details" "$shot"
+          # The right column's header and the left column's two new rows.
+          grep -q "Files (" "$shot"
+          grep -q "Branch:" "$shot"
+          grep -q "Tags:" "$shot"
+          if [[ "${{ matrix.rung }}" == "ascii" ]]; then
+            grep -q "+- Commit Details" "$shot"
+          else
+            grep -q "├─ Commit Details" "$shot"
+          fi
 
       - name: Upload pty artifacts
         uses: actions/upload-artifact@v4
