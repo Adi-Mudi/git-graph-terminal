@@ -51,6 +51,9 @@ mod files;
 #[allow(dead_code)]
 #[path = "../src/find/mod.rs"]
 mod find;
+// W7/T3: `app.rs` owns the read-only pager overlay, so its module comes along.
+#[path = "../src/pager.rs"]
+mod pager;
 
 #[allow(dead_code)] // `main.rs` is absent, so its `AppState` entry points look unused.
 #[path = "../src/app.rs"]

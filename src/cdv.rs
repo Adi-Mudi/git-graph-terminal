@@ -113,6 +113,9 @@ pub struct CdvState {
     pub reviewed: Vec<String>,
     /// `expandedCommit.lastViewedFile`.
     pub last_viewed_file: Option<String>,
+    /// Cursor row into [`CdvState::file_rows`] (W7/T3) — the file-row menu's
+    /// selected row, so A65–A68 can act on it.
+    pub selected: usize,
     /// Scroll offset into the rendered lines.
     pub scroll: u16,
     /// Panel height in terminal rows.
@@ -139,6 +142,7 @@ impl CdvState {
             closed_folders: Vec::new(),
             reviewed: Vec::new(),
             last_viewed_file: None,
+            selected: 0,
             scroll: 0,
             height: DEFAULT_HEIGHT,
             auto_center: true,
@@ -162,6 +166,7 @@ impl CdvState {
             closed_folders: Vec::new(),
             reviewed: Vec::new(),
             last_viewed_file: None,
+            selected: 0,
             scroll: 0,
             height: DEFAULT_HEIGHT,
             auto_center: true,
@@ -185,6 +190,7 @@ impl CdvState {
             closed_folders: Vec::new(),
             reviewed: Vec::new(),
             last_viewed_file: None,
+            selected: 0,
             scroll: 0,
             height: DEFAULT_HEIGHT,
             auto_center: true,
@@ -208,6 +214,7 @@ impl CdvState {
             closed_folders: Vec::new(),
             reviewed: Vec::new(),
             last_viewed_file: None,
+            selected: 0,
             scroll: 0,
             height: DEFAULT_HEIGHT,
             auto_center: true,
@@ -278,6 +285,75 @@ impl CdvState {
         let closed: std::collections::HashSet<String> =
             self.closed_folders.iter().cloned().collect();
         files::file_rows(&self.tree, &self.changes, self.view, &closed)
+    }
+
+    /// Number of rendered file rows.
+    pub fn file_rows_len(&self) -> usize {
+        self.file_rows().len()
+    }
+
+    /// Keep the cursor inside the row list after a collapse/expand (W7/T3).
+    pub fn clamp_selection(&mut self) {
+        let len = self.file_rows_len();
+        self.selected = if len == 0 {
+            0
+        } else {
+            self.selected.min(len - 1)
+        };
+    }
+
+    /// Move the file-row cursor by `delta`, clamped at both ends (W7/T3).
+    pub fn move_selection(&mut self, delta: i32) {
+        let len = self.file_rows_len();
+        if len == 0 {
+            self.selected = 0;
+            return;
+        }
+        self.selected = (self.selected as i32 + delta).clamp(0, len as i32 - 1) as usize;
+    }
+
+    /// The row under the cursor, if any.
+    pub fn selected_row(&self) -> Option<FileRow> {
+        self.file_rows().into_iter().nth(self.selected)
+    }
+
+    /// Full path of the row under the cursor.
+    pub fn selected_path(&self) -> Option<String> {
+        self.selected_row().map(|row| row.path)
+    }
+
+    /// The change the cursor points at, or `None` on a folder row (A65–A68).
+    pub fn selected_change(&self) -> Option<&GitFileChange> {
+        match self.selected_row()?.kind {
+            FileRowKind::File(index) => self.changes.get(index),
+            FileRowKind::Folder { .. } => None,
+        }
+    }
+
+    /// Collapse (`open = false`) or expand (`open = true`) the folder under the
+    /// cursor (W7/T3).
+    pub fn set_folder_open_at_cursor(&mut self, open: bool) {
+        if let Some(row) = self.selected_row() {
+            if matches!(row.kind, FileRowKind::Folder { .. }) && self.folder_open(&row.path) != open
+            {
+                self.toggle_folder(&row.path);
+                self.clamp_selection();
+            }
+        }
+    }
+
+    /// Scroll so the cursor row is inside `viewport` (W7/T3).
+    pub fn ensure_file_visible(&mut self, viewport: u16) {
+        if viewport == 0 {
+            return;
+        }
+        let header = self.summary_lines().len() as u16 + 2;
+        let line = header.saturating_add(self.selected as u16);
+        if line < self.scroll {
+            self.scroll = line;
+        } else if line >= self.scroll.saturating_add(viewport) {
+            self.scroll = line + 1 - viewport;
+        }
     }
 
     /// The summary lines (`web/main.ts:2539-2575`) — VIS-038/039/040.
@@ -397,39 +473,44 @@ impl CdvState {
     }
 
     /// One file-list row (VIS-047 / VIS-048 / VIS-052).
-    pub fn file_line(&self, row: &FileRow) -> Line<'static> {
+    ///
+    /// `selected` draws the W7/T3 cursor: a `›` gutter and a highlight, so the
+    /// file-row menu's target is always visible.
+    pub fn file_line(&self, row: &FileRow, selected: bool) -> Line<'static> {
         let indent = "  ".repeat(row.depth as usize);
+        let mut spans: Vec<Span<'static>> = vec![Span::styled(
+            if selected { "› " } else { "  " },
+            Style::default().fg(Color::Cyan),
+        )];
         match row.kind {
-            FileRowKind::Folder { open } => Line::from(vec![
-                Span::raw(indent),
-                Span::styled(
+            FileRowKind::Folder { open } => {
+                spans.push(Span::raw(indent));
+                spans.push(Span::styled(
                     if open { "▼ " } else { "▶ " },
                     Style::default().fg(Color::DarkGray),
-                ),
-                Span::styled(
+                ));
+                spans.push(Span::styled(
                     row.label.clone(),
                     Style::default()
                         .fg(Color::Blue)
                         .add_modifier(Modifier::BOLD),
-                ),
-            ]),
+                ));
+            }
             FileRowKind::File(index) => {
                 let Some(change) = self.changes.get(index) else {
-                    return Line::raw(row.label.clone());
+                    spans.push(Span::raw(row.label.clone()));
+                    return Line::from(spans);
                 };
-                let mut spans = vec![
-                    Span::raw(indent),
-                    Span::raw("  "),
-                    Span::styled(row.label.clone(), status_style(change.status)),
-                ];
-                // VIS-047: the status badge, then the counts for modified text files.
+                spans.push(Span::raw(indent));
+                spans.push(Span::raw("  "));
+                spans.push(Span::styled(row.label.clone(), status_style(change.status)));
+                // VIS-047: the status badge, then the counts. The reference only
+                // renders the `+N|-M` span for a changed *text* file that is not
+                // added, untracked or deleted (`web/main.ts:3591`).
                 spans.push(Span::styled(
                     format!(" [{}]", change.status.code()),
                     status_style(change.status).add_modifier(Modifier::BOLD),
                 ));
-                // VIS-047: the status badge, then the counts. The reference only
-                // renders the `+N|-M` span for a changed *text* file that is not
-                // added, untracked or deleted (`web/main.ts:3591`).
                 if !matches!(
                     change.status,
                     GitFileStatus::Added | GitFileStatus::Untracked | GitFileStatus::Deleted
@@ -474,8 +555,13 @@ impl CdvState {
                         Style::default().fg(Color::DarkGray),
                     ));
                 }
-                Line::from(spans)
             }
+        }
+        let line = Line::from(spans);
+        if selected {
+            line.style(Style::default().bg(Color::DarkGray))
+        } else {
+            line
         }
     }
 
@@ -508,8 +594,8 @@ impl CdvState {
                 Style::default().fg(Color::DarkGray),
             ));
         } else {
-            for row in self.file_rows() {
-                lines.push(self.file_line(&row));
+            for (index, row) in self.file_rows().iter().enumerate() {
+                lines.push(self.file_line(row, index == self.selected));
             }
         }
         lines

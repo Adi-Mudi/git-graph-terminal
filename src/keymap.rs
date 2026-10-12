@@ -44,7 +44,7 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use crate::app::{Action, MenuNav};
+use crate::app::{Action, MenuNav, PagerNav};
 use crate::dialog::DialogKey;
 
 /// Does this key open the context menu for the selected row?
@@ -112,6 +112,28 @@ pub fn dialog_key_for(key: KeyEvent) -> Option<DialogKey> {
     }
 }
 
+/// Translate a key for the **open** pager (W7/T3).
+///
+/// The pager is read-only, so the map is small: `Esc`/`q` close it, `j`/`k` and
+/// the arrows scroll by one line, `PageUp`/`PageDown` by a screenful, and
+/// `Home`/`End` jump to the ends. This runs before [`action_for`], so `q` closes
+/// the pager instead of quitting the app.
+pub fn pager_nav_for(key: KeyEvent) -> Option<PagerNav> {
+    if key.modifiers.contains(KeyModifiers::ALT) || key.modifiers.contains(KeyModifiers::CONTROL) {
+        return None;
+    }
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('Q') => Some(PagerNav::Close),
+        KeyCode::Up | KeyCode::Char('k') => Some(PagerNav::LineUp),
+        KeyCode::Down | KeyCode::Char('j') => Some(PagerNav::LineDown),
+        KeyCode::PageUp => Some(PagerNav::PageUp),
+        KeyCode::PageDown => Some(PagerNav::PageDown),
+        KeyCode::Home => Some(PagerNav::Top),
+        KeyCode::End => Some(PagerNav::Bottom),
+        _ => None,
+    }
+}
+
 /// Translate a key for the **open** find widget (W7/T2).
 ///
 /// While the widget owns the keyboard, a plain character is query text
@@ -132,6 +154,40 @@ pub fn find_key_for(key: KeyEvent) -> Option<FindKey> {
         KeyCode::Enter if shift => Some(FindKey::Prev),
         KeyCode::Enter => Some(FindKey::Next),
         KeyCode::Char(c) if !shift => Some(FindKey::Char(c)),
+        _ => None,
+    }
+}
+
+/// Translate a key for the **focused** CDV file list (W7/T3).
+///
+/// The reference reaches the file-row menu and the reviewed checkbox through
+/// **click targets** (`#cdvFileViewTypeTree`, the row context menu, and the
+/// `Reviewed` cell at `web/main.ts:2620`), not keys. A terminal needs keys, so
+/// this map is the terminal equivalent of those controls. It runs only while
+/// `Tab` has given the CDV the keyboard, so the commit table's `j`/`k`/`Enter`
+/// stay theirs.
+///
+/// | key | action | reference control |
+/// | --- | ------ | ----------------- |
+/// | `j` / `Down` | next file row | — |
+/// | `k` / `Up` | previous file row | — |
+/// | `Enter` | A65 View Diff | file-row menu |
+/// | `o` | A66 View File at Revision | file-row menu |
+/// | `Space` | A68 Mark Reviewed (VIS-049) | the row's `Reviewed` cell |
+/// | `Left` | collapse folder | `alterFileTreeFolderOpen` |
+/// | `Right` | expand folder | `alterFileTreeFolderOpen` |
+pub fn cdv_key_for(key: KeyEvent) -> Option<Action> {
+    if key.modifiers.contains(KeyModifiers::CONTROL) || key.modifiers.contains(KeyModifiers::ALT) {
+        return None;
+    }
+    match key.code {
+        KeyCode::Down | KeyCode::Char('j') => Some(Action::CdvFileNext),
+        KeyCode::Up | KeyCode::Char('k') => Some(Action::CdvFilePrev),
+        KeyCode::Enter => Some(Action::CdvFileViewDiff),
+        KeyCode::Char('o') | KeyCode::Char('O') => Some(Action::CdvFileViewRevision),
+        KeyCode::Char(' ') => Some(Action::CdvFileToggleReviewed),
+        KeyCode::Left => Some(Action::CdvFolderCollapse),
+        KeyCode::Right => Some(Action::CdvFolderExpand),
         _ => None,
     }
 }

@@ -28,7 +28,7 @@
 use std::collections::HashSet;
 use std::path::Path;
 
-use crate::actions::{self, RefAction};
+use crate::actions::{self, DispatchOutcome, RefAction};
 use crate::cdv::{CdvKind, CdvState};
 use crate::data::{self, Commit};
 use crate::dialog::{self, Dialog, DialogKey, DialogResult};
@@ -112,6 +112,8 @@ pub struct AppState {
     pub find: FindWidget,
     /// The open modal dialog, if any (W6/T2). While `Some`, it owns the keyboard.
     pub dialog: Option<Dialog>,
+    /// The open read-only pager, if any (W7/T3). While `Some`, it owns the keyboard.
+    pub pager: Option<crate::pager::Pager>,
     /// The row selected before the find widget opened, restored on `Esc`
     /// (W7/T2: `findWidget.ts:139-158` `restoreState`).
     pub selection_before_find: Option<RowIdx>,
@@ -179,6 +181,21 @@ pub enum Action {
     DialogConfirm,
     /// Dismiss the open dialog — `Esc`.
     DialogCancel,
+    /// Move the CDV file-row cursor down — `j` / Down while the CDV is focused
+    /// (W7/T3).
+    CdvFileNext,
+    /// Move the CDV file-row cursor up — `k` / Up while the CDV is focused.
+    CdvFilePrev,
+    /// Open the pager with `git diff` for the selected file row — `Enter` (A65).
+    CdvFileViewDiff,
+    /// Open the pager with `git show <hash>:<path>` — `o` (A66).
+    CdvFileViewRevision,
+    /// Mark/unmark the selected file row reviewed — `Space` (VIS-049).
+    CdvFileToggleReviewed,
+    /// Collapse the folder under the cursor — `Left`.
+    CdvFolderCollapse,
+    /// Expand the folder under the cursor — `Right`.
+    CdvFolderExpand,
 }
 
 /// What [`reduce`] wants the caller to do next.
@@ -267,6 +284,18 @@ pub enum MenuNav {
     Close,
     /// Single-key shortcut inside the menu (`a`..`z`).
     Shortcut(char),
+}
+
+/// A keypress translated for the open pager (W7/T3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PagerNav {
+    LineUp,
+    LineDown,
+    PageUp,
+    PageDown,
+    Top,
+    Bottom,
+    Close,
 }
 
 /// What [`AppState::menu_nav`] did, so the caller can dispatch on activation.
@@ -401,6 +430,7 @@ impl AppState {
             cdv_focused: false,
             find: FindWidget::new(),
             dialog: None,
+            pager: None,
             selection_before_find: None,
         }
     }
@@ -471,6 +501,11 @@ impl AppState {
     /// Is a modal dialog open? While `Some`, the dialog owns the keyboard (W7/T1).
     pub fn dialog_is_open(&self) -> bool {
         self.dialog.is_some()
+    }
+
+    /// Is the read-only pager open? While `Some`, it owns the keyboard (W7/T3).
+    pub fn pager_is_open(&self) -> bool {
+        self.pager.is_some()
     }
 
     /// Does any loaded row carry a remote-tracking decoration?
@@ -823,6 +858,15 @@ pub fn reduce(state: &mut AppState, action: Action, repo: &Path) -> Outcome {
         // [`AppState::dialog_key`]; these two actions are the terminal states.
         Action::DialogConfirm => confirm_dialog(state, repo),
         Action::DialogCancel => state.dialog = None,
+
+        // W7/T3 — the CDV file-row cursor and the A65–A68 file actions.
+        Action::CdvFileNext => cdv_move_file(state, 1),
+        Action::CdvFilePrev => cdv_move_file(state, -1),
+        Action::CdvFileViewDiff => cdv_open_pager(state, repo, RefAction::ViewDiff),
+        Action::CdvFileViewRevision => cdv_open_pager(state, repo, RefAction::ViewFileAtRevision),
+        Action::CdvFileToggleReviewed => cdv_toggle_reviewed(state),
+        Action::CdvFolderCollapse => cdv_set_folder(state, false),
+        Action::CdvFolderExpand => cdv_set_folder(state, true),
     }
     state.sync_status();
     state.ensure_visible();
@@ -899,6 +943,90 @@ fn close_cdv_for(state: &mut AppState, row: RowIdx) {
 fn resize_cdv(state: &mut AppState, delta: i32) {
     if let Some(cdv) = state.cdv.as_mut() {
         cdv.resize(delta);
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/* W7/T3 — the CDV file-row cursor and the A65–A68 file actions        */
+/* ------------------------------------------------------------------ */
+
+/// The text rows the docked panel can show, for the cursor's scroll window.
+fn cdv_file_viewport(state: &AppState) -> u16 {
+    state
+        .cdv
+        .as_ref()
+        .map(|cdv| cdv.height.saturating_sub(2))
+        .unwrap_or(0)
+}
+
+/// Move the CDV file-row cursor by `delta` (W7/T3).
+fn cdv_move_file(state: &mut AppState, delta: i32) {
+    let viewport = cdv_file_viewport(state);
+    if let Some(cdv) = state.cdv.as_mut() {
+        cdv.move_selection(delta);
+        cdv.ensure_file_visible(viewport);
+    }
+}
+
+/// Collapse (`open = false`) or expand (`open = true`) the folder under the
+/// cursor (W7/T3).
+fn cdv_set_folder(state: &mut AppState, open: bool) {
+    let viewport = cdv_file_viewport(state);
+    if let Some(cdv) = state.cdv.as_mut() {
+        cdv.set_folder_open_at_cursor(open);
+        cdv.ensure_file_visible(viewport);
+    }
+}
+
+/// Toggle the reviewed flag on the row under the cursor (VIS-049, W7/T3).
+fn cdv_toggle_reviewed(state: &mut AppState) {
+    if let Some(cdv) = state.cdv.as_mut() {
+        if let Some(path) = cdv.selected_path() {
+            cdv.toggle_reviewed(&path);
+        }
+    }
+}
+
+/// Build the [`actions::ActionTarget`] for the CDV row under the cursor.
+///
+/// `from` is the panel's commit (or the comparison's left side) and `to` is the
+/// comparison's right side, or `UNCOMMITTED` for a plain commit / working tree —
+/// exactly the pair `getCommitHashForFile` feeds to `viewDiff`
+/// (`web/main.ts:2880-2885`).
+fn cdv_file_target(state: &AppState) -> Option<actions::ActionTarget> {
+    let cdv = state.cdv.as_ref()?;
+    let change = cdv.selected_change()?;
+    let from = cdv.hash.clone();
+    let to = cdv
+        .compare_with
+        .clone()
+        .unwrap_or_else(|| crate::data::UNCOMMITTED.to_string());
+    Some(actions::ActionTarget {
+        path: change.new_path.clone(),
+        hash: from.clone(),
+        commit: from.clone(),
+        from,
+        to,
+        ..actions::ActionTarget::default()
+    })
+}
+
+/// Run `action`'s plan for the CDV row under the cursor and page the output.
+///
+/// A terminal has no editor, so the R3 tie-break puts the action + data here and
+/// leaves the editor chrome out: the pager shows exactly what git printed, with
+/// the argv git ran as its title.
+fn cdv_open_pager(state: &mut AppState, repo: &Path, action: RefAction) {
+    let Some(target) = cdv_file_target(state) else {
+        return;
+    };
+    let plan = actions::plan(action, &target);
+    let title = format!("git {}", plan.argv.join(" "));
+    match actions::dispatch(repo, action, &target) {
+        DispatchOutcome::Executed { stdout, .. } => {
+            state.pager = Some(crate::pager::Pager::new(title, &stdout));
+        }
+        other => state.status.last_action = Some(other.status_line()),
     }
 }
 
@@ -990,6 +1118,31 @@ pub fn find_key(state: &mut AppState, key: crate::keymap::FindKey, repo: &Path) 
     }
     state.sync_status();
     state.ensure_visible();
+    true
+}
+
+/// Route one keypress to the open pager (W7/T3).
+///
+/// Returns `true` when the pager consumed the key. `viewport` is the number of
+/// text rows the overlay draws, so paging and the scroll clamp match the screen.
+pub fn pager_nav(state: &mut AppState, nav: PagerNav, viewport: u16) -> bool {
+    if nav == PagerNav::Close {
+        let was_open = state.pager.is_some();
+        state.pager = None;
+        return was_open;
+    }
+    let Some(pager) = state.pager.as_mut() else {
+        return false;
+    };
+    match nav {
+        PagerNav::LineUp => pager.scroll_by(-1, viewport),
+        PagerNav::LineDown => pager.scroll_by(1, viewport),
+        PagerNav::PageUp => pager.page_by(-1, viewport),
+        PagerNav::PageDown => pager.page_by(1, viewport),
+        PagerNav::Top => pager.top(),
+        PagerNav::Bottom => pager.bottom(viewport),
+        PagerNav::Close => unreachable!("handled above"),
+    }
     true
 }
 

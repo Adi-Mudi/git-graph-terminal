@@ -49,6 +49,7 @@ use crate::dialog::Dialog;
 use crate::find::FindWidget;
 use crate::layout::types::{GraphLayout, RowIdx};
 use crate::menu::ContextMenu;
+use crate::pager;
 use crate::render::columns::{commits_table_window, text_offset};
 use crate::render::glyphs::GlyphTier;
 use crate::render::graph_widget::GraphWidget;
@@ -126,6 +127,11 @@ pub fn ui(frame: &mut Frame, state: &AppState, view: &ViewOptions<'_>) {
     }
     if let Some(menu) = &state.menu {
         context_menu(frame, menu, frame.area());
+    }
+    // The pager is the top-most layer: it covers the whole window, including the
+    // status bar, and the event loop routes every key to it while it is open.
+    if let Some(pager) = &state.pager {
+        pager::draw(frame, frame.area(), pager);
     }
 }
 

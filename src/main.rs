@@ -35,6 +35,7 @@ mod find;
 mod keymap;
 mod layout;
 mod menu;
+mod pager;
 mod render;
 
 use std::io::{self, Stdout, Write};
@@ -52,7 +53,8 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 
 use crate::app::{
-    dialog_key, find_key, reduce, Action, AppState, ClickTarget, MenuKey, MenuNav, Outcome,
+    dialog_key, find_key, pager_nav, reduce, Action, AppState, ClickTarget, MenuKey, MenuNav,
+    Outcome,
 };
 use crate::dialog::DialogResult;
 use crate::menu::MenuSurface;
@@ -130,11 +132,12 @@ fn main() -> io::Result<()> {
 
         // Everything the mouse router needs for this frame: the full screen
         // rect (for menu clamping) and the main-area geometry.
+        let screen_height = state.status.height.saturating_add(chrome);
         let screen = ratatui::layout::Rect {
             x: 0,
             y: 0,
             width: state.status.width,
-            height: state.status.height.saturating_add(chrome),
+            height: screen_height,
         };
         let view = make_view(&state, tier, colour, mock, show_graph);
         let hit = render::hit_geometry(&state, &view);
@@ -144,9 +147,17 @@ fn main() -> io::Result<()> {
         }
         match event::read()? {
             Event::Key(key) if key.kind == KeyEventKind::Press => {
-                // The modal dialog is the outermost overlay while it is open, so
-                // it claims the keyboard before the menu and the global map
-                // (W7/T1).
+                // Overlay ownership, outermost first. The pager and the dialog
+                // are modal, so they claim the keyboard before anything else
+                // (W7/T1, W7/T3); the menu and the find widget come next, and
+                // the focused CDV only takes the file-list keys, so the W6
+                // chords (`Tab`, `Ctrl+W`, `v`, `+`/`-`) keep working.
+                if state.pager_is_open() {
+                    if let Some(nav) = keymap::pager_nav_for(key) {
+                        pager_nav(&mut state, nav, pager::viewport(screen_height));
+                    }
+                    continue;
+                }
                 if state.dialog_is_open() {
                     if let Some(dialog_key_event) = keymap::dialog_key_for(key) {
                         match dialog_key(&mut state, dialog_key_event) {
@@ -186,6 +197,16 @@ fn main() -> io::Result<()> {
                 if show_graph && keymap::opens_menu(key) {
                     state.open_menu_for_selection(0, 1);
                     continue;
+                }
+                // `Tab` has given the CDV the keyboard: its file list owns the
+                // row-movement and row-action keys (W7/T3).
+                if state.cdv_focused && state.cdv.is_some() {
+                    if let Some(action) = keymap::cdv_key_for(key) {
+                        if reduce(&mut state, action, &repo) == Outcome::Quit {
+                            break;
+                        }
+                        continue;
+                    }
                 }
                 if let Some(action) = keymap::action_for(key) {
                     // Expansion only exists in the graph view; the P0 text list
