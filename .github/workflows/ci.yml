@@ -84,7 +84,10 @@ jobs:
           set -euo pipefail
           frame="target/pty/ci-${{ matrix.term }}.frame"
           test -s "$frame"
-          grep -q "commits (" "$frame"
+          # MOCK=1 (pty-shot.sh default) renders the GRAPH view, whose status bar
+          # prints "commits: N" (colon). "commits (" is the text-list border title
+          # only, so it can never appear in this frame.
+          grep -q "commits:" "$frame"
           grep -q "caps: ${{ matrix.caps }}" "$frame"
           grep -q "graph:" "$frame"
 

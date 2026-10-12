@@ -44,7 +44,7 @@ capability ladder, the env toggles (`GGT_OSC52`, `GGT_CLIPBOARD_FILE`, `NO_COLOR
 `TERM`/`COLORTERM`), the tested-terminal matrix, and the dev/CI commands.
 
 **No hand-typed drift.** The keybindings table is generated from
-`keymap::BINDINGS` (65 rows, grouped by context) via `keybindings_markdown()`, which
+`keymap::BINDINGS` (69 rows, grouped by context) via `keybindings_markdown()`, which
 `--keybindings` prints. Two tests guard it:
 
 | Test | Asserts |
@@ -98,11 +98,18 @@ commit — which is the live proof the watch works.
 2. **`pty-e2e`** — a separate remote job (D4: all PTY/visual E2E runs are remote-only).
    Matrix: `TERM=xterm-256color` (`plain/256/unicode`) and `TERM=vt100` (`plain/16/ascii`).
    It installs `util-linux`/`binutils`, builds, drives `tools/pty-shot.sh`, then asserts
-   the deterministic `--dump` frame contains `commits (`, the promised `caps:` ladder, and
-   `graph:`, and uploads `target/pty/` as an artifact.
+   the deterministic `--dump` frame contains `commits:` (the graph status-bar field — `MOCK=1`
+   renders the graph view, not the text-list border title `commits (`), the promised `caps:`
+   ladder, and `graph:`, and uploads `target/pty/` as an artifact.
 
 The G8 parity harness is left as a commented hook — it needs the read-only reference
 checkout, which is not a submodule here.
+
+**CI is written but NEVER EXECUTED.** This repository has no git remote
+(`git remote -v` is empty) and is local-only, so neither job has ever run on a CI
+runner. The workflow only executes once the project is pushed to a GitHub remote.
+The gate row below validates the YAML syntax (`yaml.safe_load`) and the job structure
+locally — it is not a claim that CI ran or passed.
 
 ## Gate
 
@@ -113,7 +120,7 @@ checkout, which is not a submodule here.
 | `cargo test` | **PASS** — **703** tests, 0 failed (282 bin + 282 app_state + 15 golden + 63 integration + 61 perf) |
 | Tests added this wave | **8** — 3 (T1, `main.rs`) + 3 (T3, `version.rs`) + 2 (T2, `keymap.rs`) |
 | `cargo build --release` | **PASS** |
-| `--version` | **PASS** — `git-graph-terminal 0.3.0 (0d52cc4)` |
+| `--version` | **PASS** — `git-graph-terminal 0.3.0 (a66b801)` |
 | `--keybindings` ↔ README sync test | **PASS** |
 | CI YAML validates (`yaml.safe_load`) | **PASS** — 2 jobs (`test`, `pty-e2e`) |
 | Dumb smoke (`TERM=dumb --dump --mock`) | **PASS** (exit 0, list frame) |
