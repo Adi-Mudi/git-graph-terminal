@@ -203,6 +203,17 @@ pub enum Action {
     CdvFolderCollapse,
     /// Expand the folder under the cursor — `Right`.
     CdvFolderExpand,
+    /// Page `git diff <hash> -- <path>` for the selected file row — `w` (A67).
+    /// The working-tree half of `viewDiffWithWorkingFile`.
+    CdvFileViewDiffWithWorkingFile,
+    /// Page `git show :<path>` for the selected file row — `e` (A68).
+    CdvFileOpen,
+    /// Ask before `git checkout <hash> -- <path>` — `R` (A71, gated).
+    CdvFileResetToRevision,
+    /// Copy the absolute path of the selected file row — `y` (A72).
+    CdvFileCopyAbsolutePath,
+    /// Copy the repo-relative path of the selected file row — `Y` (A73).
+    CdvFileCopyRelativePath,
 }
 
 impl Action {
@@ -250,6 +261,11 @@ impl Action {
         Action::CdvFileToggleReviewed,
         Action::CdvFolderCollapse,
         Action::CdvFolderExpand,
+        Action::CdvFileViewDiffWithWorkingFile,
+        Action::CdvFileOpen,
+        Action::CdvFileResetToRevision,
+        Action::CdvFileCopyAbsolutePath,
+        Action::CdvFileCopyRelativePath,
     ];
 }
 
@@ -376,6 +392,9 @@ pub struct HitGeometry {
     pub graph_width: u16,
     /// Does the area start with a one-row table header?
     pub has_header: bool,
+    /// The docked commit-details panel (`chunks[1]`), when it is open (W10).
+    /// `None` means no CDV is drawn, so no cell can belong to it.
+    pub cdv: Option<ratatui::layout::Rect>,
 }
 
 /// What a screen cell belongs to.
@@ -385,6 +404,15 @@ pub enum ClickTarget {
     ColumnHeader,
     /// A commit row, with the surface its refs (or its position) imply.
     Row(RowIdx, MenuSurface, String),
+    /// A file row in the docked commit-details view, with its full path — the
+    /// `MenuSurface::FileRow` menu (A65…A73, W10).
+    CdvFile(String),
+    /// A folder row in the docked commit-details view, with its full path.
+    ///
+    /// The `FileRow` menu is file-only, so a folder opens no menu: the reference
+    /// binds a click on `.fileTreeFolder` to the open/closed flip instead
+    /// (`web/main.ts:2968-2978`), which is INT-050.
+    CdvFolder(String),
 }
 
 impl AppState {
@@ -609,6 +637,16 @@ impl AppState {
                 ctx.remote.clear();
                 ctx.selector.clear();
             }
+            // A file-row menu is about one path. `from_ref` would otherwise file
+            // the path under `ref_name`, and every `A65`..`A73` item is gated on
+            // `path` being set (W10).
+            MenuSurface::FileRow => {
+                ctx.ref_name.clear();
+                ctx.branch.clear();
+                ctx.remote.clear();
+                ctx.selector.clear();
+                ctx.path = target_ref.unwrap_or_default().to_string();
+            }
             _ => {}
         }
         if matches!(surface, MenuSurface::Uncommitted) {
@@ -778,6 +816,15 @@ impl AppState {
 
     /// Route a screen cell back to a click target (mouse right-click support).
     pub fn surface_at(&self, x: u16, y: u16, hit: &HitGeometry) -> Option<ClickTarget> {
+        // The docked CDV is its own surface and sits *below* the table body, so
+        // it is checked first: a cell inside the panel must never be read as a
+        // commit row (W10). A summary line or a cell outside the panel's inner
+        // rect falls through to the body checks below, which exclude the panel.
+        if let Some(cdv) = hit.cdv {
+            if let Some(target) = self.cdv_file_at(x, y, cdv) {
+                return Some(target);
+            }
+        }
         let body = hit.body;
         if body.width == 0 || body.height == 0 {
             return None;
@@ -817,6 +864,40 @@ impl AppState {
             MenuSurface::CommitRow,
             commit.hash.clone(),
         ))
+    }
+
+    /// The file row under `(x, y)` inside the docked CDV, or `None` (W10).
+    ///
+    /// The panel renders [`CdvState::lines`], whose first
+    /// `summary_lines().len() + 2` lines are the summary block plus the
+    /// `Files (N) — … View` header; the file rows follow in `file_rows()` order.
+    /// Folder rows carry no menu surface, so a click on one resolves to `None`.
+    fn cdv_file_at(&self, x: u16, y: u16, cdv: ratatui::layout::Rect) -> Option<ClickTarget> {
+        let panel = self.cdv.as_ref()?;
+        // `cdv::draw` wraps the panel in a one-cell border on every side.
+        let inner_x = cdv.x.saturating_add(1);
+        let inner_y = cdv.y.saturating_add(1);
+        let inner_w = cdv.width.saturating_sub(2);
+        let inner_h = cdv.height.saturating_sub(2);
+        if inner_w == 0 || inner_h == 0 {
+            return None;
+        }
+        if x < inner_x || x >= inner_x.saturating_add(inner_w) {
+            return None;
+        }
+        if y < inner_y || y >= inner_y.saturating_add(inner_h) {
+            return None;
+        }
+        let display = panel.scroll.saturating_add(y - inner_y);
+        let header = panel.summary_lines().len() as u16 + 2;
+        let index = usize::from(display.checked_sub(header)?);
+        let rows = panel.file_rows();
+        match rows.get(index)?.kind {
+            files::FileRowKind::File(_) => Some(ClickTarget::CdvFile(rows[index].path.clone())),
+            files::FileRowKind::Folder { .. } => {
+                Some(ClickTarget::CdvFolder(rows[index].path.clone()))
+            }
+        }
     }
 }
 
@@ -923,6 +1004,14 @@ pub fn reduce(state: &mut AppState, action: Action, repo: &Path) -> Outcome {
         Action::CdvFileToggleReviewed => cdv_toggle_reviewed(state),
         Action::CdvFolderCollapse => cdv_set_folder(state, false),
         Action::CdvFolderExpand => cdv_set_folder(state, true),
+        // W10 — the rest of the `FileRow` inventory (A67, A68, A71…A73).
+        Action::CdvFileViewDiffWithWorkingFile => {
+            cdv_open_pager(state, repo, RefAction::ViewDiffWithWorkingFile)
+        }
+        Action::CdvFileOpen => cdv_open_pager(state, repo, RefAction::OpenFile),
+        Action::CdvFileResetToRevision => cdv_reset_file(state, repo),
+        Action::CdvFileCopyAbsolutePath => cdv_copy_path(state, repo, true),
+        Action::CdvFileCopyRelativePath => cdv_copy_path(state, repo, false),
 
         // W7/T4 — the uncommitted and comparison CDV kinds.
         Action::CdvOpenUncommitted => open_uncommitted_cdv(state, repo),
@@ -1119,6 +1208,20 @@ fn cdv_set_folder(state: &mut AppState, open: bool) {
     }
 }
 
+/// Toggle a folder row in the docked CDV by path (INT-050, W10).
+///
+/// The reference binds a click on `.fileTreeFolder` to the same open/closed flip
+/// `Left`/`Right` perform on the cursor (`web/main.ts:2968-2978`). Unlike a file
+/// row this does not move the cursor — `CdvState::select_path` is file-only, and
+/// the click names the folder directly.
+pub fn toggle_cdv_folder(state: &mut AppState, path: &str) {
+    let viewport = cdv_file_viewport(state);
+    if let Some(cdv) = state.cdv.as_mut() {
+        cdv.toggle_folder(path);
+        cdv.ensure_file_visible(viewport);
+    }
+}
+
 /// Toggle the reviewed flag on the row under the cursor (VIS-049, W7/T3).
 fn cdv_toggle_reviewed(state: &mut AppState) {
     if let Some(cdv) = state.cdv.as_mut() {
@@ -1168,6 +1271,56 @@ fn cdv_open_pager(state: &mut AppState, repo: &Path, action: RefAction) {
             state.pager = Some(crate::pager::Pager::new(title, &stdout));
         }
         other => state.status.last_action = Some(other.status_line()),
+    }
+}
+
+/// Run the gated `Reset File to this Revision` on the CDV row — `R` (A71, W10).
+///
+/// `git checkout <hash> -- <path>` overwrites a working file, so it takes the
+/// same two-step route as the menu row: [`actions::dispatch`] refuses the
+/// `Confirm` plan, and the W6 dialog it raises is the only path to
+/// `execute_confirmed`.
+fn cdv_reset_file(state: &mut AppState, repo: &Path) {
+    let Some(target) = cdv_file_target(state) else {
+        return;
+    };
+    let action = RefAction::ResetFileToRevision;
+    match actions::dispatch(repo, action, &target) {
+        DispatchOutcome::NeedsConfirm(plan) => {
+            if open_dialog_for_plan(state, action, &target, &plan) {
+                state.status.last_action = Some(format!("confirm: {}", plan.label));
+            }
+        }
+        other => state.status.last_action = Some(other.status_line()),
+    }
+}
+
+/// Copy the selected CDV file's path — `y` is absolute (A72), `Y` relative
+/// (A73, W10).
+///
+/// The menu distinguishes the two rows only by the payload it hands
+/// `copyFilePath`; the keys reuse that same seam, so both still emit DSP-011.
+fn cdv_copy_path(state: &mut AppState, repo: &Path, absolute: bool) {
+    let Some(mut target) = cdv_file_target(state) else {
+        return;
+    };
+    let text = cdv_copy_text(repo, &target.path, absolute);
+    target.clipboard = text.clone();
+    let outcome = actions::dispatch(repo, RefAction::CopyFilePath, &target);
+    // The same OSC 52 bridge the menu rows feed (`main.rs` emits it).
+    state.pending_clipboard = Some(text);
+    state.status.last_action = Some(outcome.status_line());
+}
+
+/// The text `y`/`Y` put on the clipboard for a CDV file row (A72/A73, W10).
+///
+/// Absolute is the repo joined to the row's repo-relative path; relative is the
+/// row's path untouched. This is the only difference between the two rows.
+fn cdv_copy_text(repo: &Path, path: &str, absolute: bool) -> String {
+    if absolute {
+        repo.join(path).to_string_lossy().into_owned()
+    } else {
+        path.to_string()
     }
 }
 
@@ -1768,6 +1921,7 @@ mod tests {
             },
             graph_width: 4,
             has_header: true,
+            cdv: None,
         }
     }
 
@@ -2168,5 +2322,413 @@ mod tests {
             }
             other => panic!("expected the commit menu, got {other:?}"),
         }
+    }
+
+    /* -------------------------------------------------------------- */
+    /* W10 — the docked CDV as a click surface                         */
+    /* -------------------------------------------------------------- */
+
+    /// A loaded, uncommitted CDV listing one modified file per path, plus the
+    /// geometry that docks the panel under a 12-row body (W10).
+    fn cdv_geometry(paths: &[&str]) -> (AppState, HitGeometry) {
+        let changes = paths
+            .iter()
+            .map(|path| files::GitFileChange {
+                old_path: (*path).to_string(),
+                new_path: (*path).to_string(),
+                status: files::GitFileStatus::Modified,
+                additions: Some(1),
+                deletions: Some(0),
+                submodule: false,
+            })
+            .collect();
+        let mut state = state_of(linear(4));
+        // `main.rs` sizes the status bar to the screen minus the two chrome rows.
+        state.status.width = 100;
+        state.status.height = 22;
+        state.cdv = Some(CdvState::uncommitted(0, changes));
+        state.cdv_focused = true;
+        let mut hit = geometry();
+        hit.body.height = 12;
+        hit.cdv = Some(ratatui::layout::Rect {
+            x: 0,
+            y: 12,
+            width: 100,
+            height: 10,
+        });
+        (state, hit)
+    }
+
+    /// Screen row of file row `index` inside `cdv_geometry`'s panel.
+    fn cdv_row_y(state: &AppState, hit: &HitGeometry, index: usize) -> u16 {
+        let panel = state.cdv.as_ref().expect("the panel is open");
+        let inner_top = hit.cdv.expect("the panel has a rect").y + 1;
+        let header = panel.summary_lines().len() as u16 + 2;
+        inner_top + header + index as u16
+    }
+
+    #[test]
+    fn surface_at_reads_the_docked_cdv_as_file_rows() {
+        let (state, hit) = cdv_geometry(&["src/lib.rs", "src/app.rs"]);
+        let rows = state.cdv.as_ref().unwrap().file_rows();
+        let folder = rows
+            .iter()
+            .position(|row| matches!(row.kind, files::FileRowKind::Folder { .. }))
+            .expect("a tree view folds src/ into a folder row");
+        let file = rows
+            .iter()
+            .position(|row| matches!(row.kind, files::FileRowKind::File(_)))
+            .expect("two file rows");
+        // A file row is the `FileRow` menu's subject, and the cell carries its
+        // full path — the two must agree or the menu would act on another file.
+        assert_eq!(
+            state.surface_at(1, cdv_row_y(&state, &hit, file), &hit),
+            Some(ClickTarget::CdvFile(rows[file].path.clone())),
+            "a file row resolves to its own path"
+        );
+        // A folder row is its own target: it has no `FileRow` menu, but the
+        // reference flips it open/closed on click, so it must not fall through
+        // to the commit-row menu below the panel (INT-050).
+        assert_eq!(
+            state.surface_at(1, cdv_row_y(&state, &hit, folder), &hit),
+            Some(ClickTarget::CdvFolder(rows[folder].path.clone())),
+            "a folder row resolves to its own path"
+        );
+        // The border column and the empty space under the last row are not rows.
+        assert_eq!(
+            state.surface_at(0, cdv_row_y(&state, &hit, file), &hit),
+            None
+        );
+        assert_eq!(
+            state.surface_at(1, cdv_row_y(&state, &hit, rows.len() + 1), &hit),
+            None,
+            "past the last row is empty"
+        );
+        // The first body row is still a commit row: the panel did not swallow it.
+        assert!(matches!(
+            state.surface_at(0, 1, &hit),
+            Some(ClickTarget::Row(0, _, _))
+        ));
+    }
+
+    #[test]
+    fn a_folder_click_toggles_it_open_and_closed() {
+        let (mut state, hit) = cdv_geometry(&["src/lib.rs", "src/app.rs"]);
+        let rows = state.cdv.as_ref().unwrap().file_rows();
+        let folder = rows
+            .iter()
+            .position(|row| matches!(row.kind, files::FileRowKind::Folder { .. }))
+            .expect("a tree view folds src/ into a folder row");
+        let path = rows[folder].path.clone();
+        let target = state
+            .surface_at(1, cdv_row_y(&state, &hit, folder), &hit)
+            .expect("the folder row is a click target");
+        assert_eq!(target, ClickTarget::CdvFolder(path.clone()));
+
+        let files_before = state.cdv.as_ref().unwrap().file_rows().len();
+        assert!(
+            !state.cdv.as_ref().unwrap().closed_folders.contains(&path),
+            "the tree starts expanded"
+        );
+
+        // First click closes it: the children stop being listed.
+        toggle_cdv_folder(&mut state, &path);
+        assert!(state.cdv.as_ref().unwrap().closed_folders.contains(&path));
+        assert!(
+            state.cdv.as_ref().unwrap().file_rows().len() < files_before,
+            "closing a folder hides its children"
+        );
+
+        // Second click re-opens it, restoring exactly the original rows.
+        toggle_cdv_folder(&mut state, &path);
+        assert!(!state.cdv.as_ref().unwrap().closed_folders.contains(&path));
+        assert_eq!(state.cdv.as_ref().unwrap().file_rows().len(), files_before);
+    }
+
+    #[test]
+    fn surface_at_ignores_a_closed_cdv() {
+        let (mut state, mut hit) = cdv_geometry(&["src/lib.rs"]);
+        state.cdv = None;
+        hit.cdv = None;
+        // With the panel closed no cell can be a file row, and the body is the
+        // only surface left — row 12 is past the four commits, so it is empty.
+        assert_eq!(state.surface_at(1, 13, &hit), None, "past the last commit");
+        for y in 0..24 {
+            assert!(
+                !matches!(
+                    state.surface_at(1, y, &hit),
+                    Some(ClickTarget::CdvFile(_)) | Some(ClickTarget::CdvFolder(_))
+                ),
+                "row {y} must not resolve to a closed panel"
+            );
+        }
+    }
+
+    #[test]
+    fn hit_geometry_docks_the_cdv_under_the_body() {
+        let (mut state, _) = cdv_geometry(&["src/lib.rs"]);
+        let panel = state.cdv.as_ref().unwrap();
+        let panel_rows = crate::cdv::panel_height(panel, 24, 1);
+        let view = crate::render::ViewOptions {
+            graph: Some(&state.layout),
+            ..crate::render::ViewOptions::TEXT_ONLY
+        };
+        let hit = crate::render::hit_geometry(&state, &view, 24).expect("geometry");
+        let cdv = hit.cdv.expect("the panel is open, so it has a rect");
+        assert_eq!(
+            cdv.y, hit.body.height,
+            "the panel starts where the body ends"
+        );
+        assert_eq!(cdv.height, panel_rows);
+        assert_eq!(
+            hit.body.height + cdv.height + 1,
+            24,
+            "body + panel + status bar fill the screen"
+        );
+        // Before W10 the body was `status.height + 1`, which ignored the panel
+        // and reached over it: the commit rows would cover the file rows.
+        assert!(
+            hit.body.height < state.status.height,
+            "the body must not cover the docked panel"
+        );
+        state.find.visible = true;
+        let with_find = crate::render::hit_geometry(&state, &view, 24).expect("geometry");
+        let overlays = crate::render::overlay_rows(&state, 24);
+        assert_eq!(
+            with_find.body.height + with_find.cdv.unwrap().height + overlays.find + 1,
+            24,
+            "body + panel + find bar + status bar fill the screen"
+        );
+        assert!(
+            with_find.body.height < hit.body.height,
+            "the find bar is charged to the body too"
+        );
+    }
+
+    #[test]
+    fn a_cdv_file_click_moves_the_cursor_and_opens_the_file_menu() {
+        let (mut state, hit) = cdv_geometry(&["src/lib.rs", "src/app.rs"]);
+        let rows = state.cdv.as_ref().unwrap().file_rows();
+        let last = rows
+            .iter()
+            .rposition(|row| matches!(row.kind, files::FileRowKind::File(_)))
+            .expect("two file rows");
+        let y = cdv_row_y(&state, &hit, last);
+        let path = rows[last].path.clone();
+        match state.surface_at(1, y, &hit).expect("the file row") {
+            ClickTarget::CdvFile(hit_path) => {
+                assert_eq!(hit_path, path);
+                state.cdv.as_mut().unwrap().select_path(&hit_path);
+            }
+            other => panic!("expected a CDV file row, got {other:?}"),
+        }
+        assert_eq!(
+            state.cdv.as_ref().unwrap().selected_path().as_deref(),
+            Some(path.as_str()),
+            "the click moves the cursor onto the clicked file"
+        );
+        // The menu is the `FileRow` surface and carries the path, which is what
+        // enables A65..A73 — `menu_context` never set `path` before W10.
+        state.open_menu(MenuSurface::FileRow, Some(&path), 1, y);
+        let menu = state.menu.as_ref().expect("a menu is open");
+        assert_eq!(menu.surface, MenuSurface::FileRow);
+        assert_eq!(menu.context.path, path);
+        assert!(menu.context.ref_name.is_empty(), "not a ref menu");
+        let ids: Vec<&str> = menu.items.iter().map(|item| item.id).collect();
+        assert_eq!(
+            ids,
+            vec!["A65", "A66", "A67", "A68", "A69", "A70", "A71", "A72", "A73"],
+            "the file-row inventory"
+        );
+        assert!(
+            menu.items.iter().all(|item| item.enabled),
+            "a non-empty path enables every item"
+        );
+    }
+
+    #[test]
+    fn select_path_ignores_a_folder_row() {
+        let (mut state, _) = cdv_geometry(&["src/lib.rs", "src/app.rs"]);
+        let panel = state.cdv.as_mut().unwrap();
+        let folder = panel
+            .file_rows()
+            .into_iter()
+            .find(|row| matches!(row.kind, files::FileRowKind::Folder { .. }))
+            .expect("a folder row");
+        assert!(
+            !panel.select_path(&folder.path),
+            "a folder is not a file row"
+        );
+        assert_eq!(panel.selected, 0, "the cursor did not move");
+    }
+
+    /* -------------------------------------------------------------- */
+    /* W10 — the A67/A68/A71/A72/A73 keys                             */
+    /* -------------------------------------------------------------- */
+
+    /// A CDV holding one file, with that file row under the cursor.
+    fn cdv_with_cursor() -> AppState {
+        let (mut state, _) = cdv_geometry(&["src/lib.rs"]);
+        assert!(
+            state.cdv.as_mut().unwrap().select_path("src/lib.rs"),
+            "the fixture lists src/lib.rs"
+        );
+        state
+    }
+
+    #[test]
+    fn the_new_cdv_keys_map_to_their_file_row_actions() {
+        use crate::keymap::cdv_key_for;
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let cases = [
+            (KeyCode::Char('w'), Action::CdvFileViewDiffWithWorkingFile),
+            (KeyCode::Char('e'), Action::CdvFileOpen),
+            (KeyCode::Char('R'), Action::CdvFileResetToRevision),
+            (KeyCode::Char('y'), Action::CdvFileCopyAbsolutePath),
+            (KeyCode::Char('Y'), Action::CdvFileCopyRelativePath),
+        ];
+        for (code, action) in cases {
+            assert_eq!(
+                cdv_key_for(KeyEvent::new(code, KeyModifiers::NONE)),
+                Some(action),
+                "{code:?} must reach {action:?}"
+            );
+        }
+        // Unshifted `r` stays free: only the gated reset takes a key, and it
+        // takes the shifted one so a stray press cannot arm it.
+        assert_eq!(
+            cdv_key_for(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE)),
+            None
+        );
+        // A67 and A68 accept either case; A72 and A73 are told apart by it.
+        assert_eq!(
+            cdv_key_for(KeyEvent::new(KeyCode::Char('W'), KeyModifiers::NONE)),
+            Some(Action::CdvFileViewDiffWithWorkingFile)
+        );
+    }
+
+    #[test]
+    fn the_new_cdv_keys_build_the_inventory_argv() {
+        let state = cdv_with_cursor();
+        let target = cdv_file_target(&state).expect("a file row is selected");
+        let plan = actions::plan(RefAction::ViewDiffWithWorkingFile, &target);
+        assert_eq!((plan.dsp, plan.act), ("DSP-060", "A67"));
+        assert_eq!(
+            plan.argv,
+            vec![
+                "diff",
+                "--no-color",
+                crate::data::UNCOMMITTED,
+                "--",
+                "src/lib.rs"
+            ],
+            "`w` diffs the working tree against the panel's commit"
+        );
+        let plan = actions::plan(RefAction::OpenFile, &target);
+        assert_eq!((plan.dsp, plan.act), ("DSP-038", "A68"));
+        assert_eq!(plan.argv, vec!["show", ":src/lib.rs"]);
+        let plan = actions::plan(RefAction::ResetFileToRevision, &target);
+        assert_eq!((plan.dsp, plan.act), ("DSP-049", "A71"));
+        assert!(plan.kind.is_gated(), "A71 overwrites a working file");
+        assert_eq!(
+            plan.argv,
+            vec!["checkout", crate::data::UNCOMMITTED, "--", "src/lib.rs"]
+        );
+    }
+
+    #[test]
+    fn the_reset_key_stops_at_the_confirmation_dialog() {
+        let mut state = cdv_with_cursor();
+        // A bogus repo proves nothing ran: a real git call would have failed.
+        reduce(
+            &mut state,
+            Action::CdvFileResetToRevision,
+            Path::new("/nonexistent/ggt-w10"),
+        );
+        assert!(
+            state.dialog.is_some(),
+            "the gated action opens the W6 dialog"
+        );
+        assert!(
+            state
+                .status
+                .last_action
+                .as_deref()
+                .unwrap_or_default()
+                .contains("confirm"),
+            "the status bar announces the confirmation"
+        );
+    }
+
+    #[test]
+    fn the_new_cdv_keys_are_no_ops_without_a_file_row() {
+        let mut state = state_of(linear(3));
+        assert!(state.cdv.is_none());
+        for action in [
+            Action::CdvFileViewDiffWithWorkingFile,
+            Action::CdvFileOpen,
+            Action::CdvFileResetToRevision,
+            Action::CdvFileCopyAbsolutePath,
+            Action::CdvFileCopyRelativePath,
+        ] {
+            reduce(&mut state, action, Path::new("/nonexistent/ggt-w10"));
+        }
+        assert!(state.dialog.is_none(), "no panel, no dialog");
+        assert!(state.pager.is_none(), "no panel, no pager");
+        assert!(state.pending_clipboard.is_none(), "no panel, no copy");
+    }
+
+    #[test]
+    fn cdv_copy_text_is_absolute_for_y_and_relative_for_shift_y() {
+        let repo = Path::new("/repos/demo");
+        assert_eq!(
+            cdv_copy_text(repo, "src/lib.rs", true),
+            "/repos/demo/src/lib.rs",
+            "A72 copies the absolute path"
+        );
+        assert_eq!(
+            cdv_copy_text(repo, "src/lib.rs", false),
+            "src/lib.rs",
+            "A73 copies the repo-relative path"
+        );
+    }
+
+    #[test]
+    fn the_copy_keys_put_the_path_on_the_clipboard() {
+        let mut state = cdv_with_cursor();
+        // Hermetic: point the fallback file at this test's own path while the
+        // shared env lock is held (`actions`' clipboard tests mutate it too).
+        let _guard = crate::actions::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let path = std::env::temp_dir().join(format!("ggt-w10-copy-{}.txt", std::process::id()));
+        std::env::set_var("GGT_CLIPBOARD_FILE", &path);
+
+        let repo = Path::new("/repos/demo");
+        reduce(&mut state, Action::CdvFileCopyRelativePath, repo);
+        assert_eq!(state.pending_clipboard.as_deref(), Some("src/lib.rs"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "src/lib.rs");
+
+        reduce(&mut state, Action::CdvFileCopyAbsolutePath, repo);
+        assert_eq!(
+            state.pending_clipboard.as_deref(),
+            Some("/repos/demo/src/lib.rs")
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "/repos/demo/src/lib.rs"
+        );
+        assert!(
+            state
+                .status
+                .last_action
+                .as_deref()
+                .unwrap_or_default()
+                .contains("copied to"),
+            "the status bar reports the copy"
+        );
+
+        std::env::remove_var("GGT_CLIPBOARD_FILE");
+        let _ = std::fs::remove_file(&path);
     }
 }

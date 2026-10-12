@@ -603,7 +603,14 @@ pub fn plan(action: RefAction, target: &ActionTarget) -> ActionPlan {
             .owned_argv(argv)
         }
         CleanUntrackedFiles => {
-            let flag = if target.directories { "-fd" } else { "-f" };
+            // `-d` also removes directories, `-x` also removes ignored files
+            // (AUDIT-001). The two are independent, so all four clusters exist.
+            let flag = match (target.directories, target.include_untracked) {
+                (false, false) => "-f",
+                (true, false) => "-fd",
+                (false, true) => "-fx",
+                (true, true) => "-fdx",
+            };
             ActionPlan::new(
                 "DSP-008",
                 "A58",
@@ -1453,6 +1460,31 @@ mod tests {
             assert_eq!(plan.argv, expected, "{action:?} argv");
             assert!(plan.kind.is_gated(), "{action:?} must be gated");
             assert!(plan.mutates(), "{action:?} mutates");
+        }
+    }
+
+    #[test]
+    fn clean_untracked_honours_directories_and_ignored_files() {
+        // AUDIT-001: the dialog's "Also remove ignored files (-x)" checkbox is
+        // bound to `include_untracked`, and `-d`/`-x` are independent.
+        let cases = [
+            (false, false, "-f"),
+            (true, false, "-fd"),
+            (false, true, "-fx"),
+            (true, true, "-fdx"),
+        ];
+        for (directories, include_untracked, expected) in cases {
+            let t = ActionTarget {
+                directories,
+                include_untracked,
+                ..target()
+            };
+            let plan = super::plan(RefAction::CleanUntrackedFiles, &t);
+            assert_eq!(
+                plan.argv,
+                vec!["clean".to_string(), expected.to_string()],
+                "directories={directories} include_untracked={include_untracked}"
+            );
         }
     }
 

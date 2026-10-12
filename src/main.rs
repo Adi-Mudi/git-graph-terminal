@@ -156,7 +156,7 @@ fn main() -> io::Result<()> {
             height: screen_height,
         };
         let view = make_view(&state, ladder, mock, show_graph);
-        let hit = render::hit_geometry(&state, &view);
+        let hit = render::hit_geometry(&state, &view, screen_height);
 
         if !event::poll(Duration::from_millis(250))? {
             continue;
@@ -266,10 +266,19 @@ fn main() -> io::Result<()> {
                     }
                     MouseEventKind::Down(MouseButton::Left) => {
                         if let Some(hit) = hit.as_ref() {
-                            if let Some(ClickTarget::Row(row, _, _)) =
-                                state.surface_at(mouse.column, mouse.row, hit)
-                            {
-                                state.selected = row;
+                            match state.surface_at(mouse.column, mouse.row, hit) {
+                                Some(ClickTarget::Row(row, _, _)) => state.selected = row,
+                                // A click inside the docked CDV moves its cursor.
+                                Some(ClickTarget::CdvFile(path)) => {
+                                    if let Some(cdv) = state.cdv.as_mut() {
+                                        cdv.select_path(&path);
+                                    }
+                                }
+                                // A folder click flips it open/closed (INT-050).
+                                Some(ClickTarget::CdvFolder(path)) => {
+                                    app::toggle_cdv_folder(&mut state, &path);
+                                }
+                                _ => {}
                             }
                         }
                     }
@@ -298,6 +307,17 @@ fn open_menu_at(state: &mut AppState, hit: Option<&app::HitGeometry>, x: u16, y:
             state.selected = row;
             state.open_menu(surface, Some(&name), x, y);
         }
+        // The `FileRow` menu acts on the row under the cursor, so the click has
+        // to move the cursor first (W10).
+        Some(ClickTarget::CdvFile(path)) => {
+            if let Some(cdv) = state.cdv.as_mut() {
+                cdv.select_path(&path);
+            }
+            state.open_menu(MenuSurface::FileRow, Some(&path), x, y);
+        }
+        // A folder has no `FileRow` menu, so a right-click opens nothing — but
+        // it still must not fall through to the commit-row menu (INT-050).
+        Some(ClickTarget::CdvFolder(_)) => state.menu = None,
         None => state.menu = None,
     }
 }
