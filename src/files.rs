@@ -57,17 +57,6 @@ impl GitFileStatus {
         }
     }
 
-    /// The word the reference prints in a row's `title` attribute.
-    pub fn label(self) -> &'static str {
-        match self {
-            GitFileStatus::Added => "Added",
-            GitFileStatus::Modified => "Modified",
-            GitFileStatus::Deleted => "Deleted",
-            GitFileStatus::Renamed => "Renamed",
-            GitFileStatus::Untracked => "Untracked",
-        }
-    }
-
     /// Parse a `--raw` / `--name-status` status letter (`R083` → [`Renamed`]).
     pub fn from_code(code: char) -> Option<Self> {
         match code.to_ascii_uppercase() {
@@ -79,15 +68,6 @@ impl GitFileStatus {
             _ => None,
         }
     }
-
-    /// Every status, in the reference's declaration order.
-    pub const ALL: [GitFileStatus; 5] = [
-        GitFileStatus::Added,
-        GitFileStatus::Modified,
-        GitFileStatus::Deleted,
-        GitFileStatus::Renamed,
-        GitFileStatus::Untracked,
-    ];
 }
 
 /// One changed file, mirroring `GG.GitFileChange` (`src/types.ts:65-71`).
@@ -127,20 +107,6 @@ impl GitFileChange {
     /// file must have text numstat (`web/main.ts:3585`).
     pub fn diff_possible(&self) -> bool {
         self.status == GitFileStatus::Untracked || self.text_file()
-    }
-
-    /// "Unable to View Diff (this is a binary file)" — VIS-047.
-    pub fn binary(&self) -> bool {
-        self.status != GitFileStatus::Untracked && !self.text_file()
-    }
-
-    /// The row title the reference builds (`web/main.ts:3586`).
-    pub fn change_label(&self) -> String {
-        let mut label = self.status.label().to_string();
-        if self.status == GitFileStatus::Renamed {
-            label.push_str(&format!(" ({} → {})", self.old_path, self.new_path));
-        }
-        label
     }
 
     /// `+N|-M` text, or `None` for a file git gives no counts for.
@@ -705,26 +671,27 @@ mod tests {
         assert_eq!(changes[0].additions, Some(5));
         assert_eq!(changes[0].deletions, Some(2));
         assert!(changes[0].diff_possible());
-        assert!(!changes[0].binary());
         // Deleted file keeps the old path as its identity.
         assert_eq!(changes[1].path(), "src/old.rs");
         assert!(changes[1].diff_possible());
-        // Rename label is the reference's `Renamed (old → new)`.
-        assert_eq!(
-            changes[2].change_label(),
-            "Renamed (src/from.rs → src/to.rs)"
-        );
-        // Binary: `-`/`-` numstat → not diff-possible, binary title.
-        assert!(changes[4].binary());
+        // Renamed file keeps both paths, so a row can show `old → new`.
+        assert_eq!(changes[2].old_path, "src/from.rs");
+        assert_eq!(changes[2].new_path, "src/to.rs");
+        // Binary: `-`/`-` numstat → not diff-possible.
         assert!(!changes[4].diff_possible());
         assert_eq!(changes[4].counts_label(), None);
     }
 
     #[test]
-    fn status_codes_and_labels_match_the_reference() {
-        for status in GitFileStatus::ALL {
+    fn status_codes_match_the_reference() {
+        for status in [
+            GitFileStatus::Added,
+            GitFileStatus::Modified,
+            GitFileStatus::Deleted,
+            GitFileStatus::Renamed,
+            GitFileStatus::Untracked,
+        ] {
             assert_eq!(GitFileStatus::from_code(status.code()), Some(status));
-            assert!(!status.label().is_empty());
         }
         assert_eq!(GitFileStatus::from_code('R'), Some(GitFileStatus::Renamed));
         assert_eq!(GitFileStatus::from_code('Z'), None);

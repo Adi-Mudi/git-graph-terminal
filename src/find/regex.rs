@@ -423,11 +423,6 @@ impl Regex {
         })
     }
 
-    /// The pattern text.
-    pub fn as_str(&self) -> &str {
-        &self.source
-    }
-
     /// Does the pattern match anywhere in `text`?
     pub fn is_match(&self, text: &[char]) -> bool {
         self.find_at(text, 0).is_some()
@@ -972,7 +967,6 @@ mod tests {
     fn display_shows_the_pattern_and_its_flag() {
         assert_eq!(compile("abc").to_string(), "/abc/");
         assert_eq!(compile_i("abc").to_string(), "/abc/i");
-        assert_eq!(compile("abc").as_str(), "abc");
     }
 
     #[test]
