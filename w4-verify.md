@@ -154,6 +154,12 @@ by `expandY`. Our W4 reserves a fixed `EXPANDED_EXTRA_ROWS = 4` gap (plan-sancti
 simplification: W4 shows the gap only; W5 fills the CDV). Direction (stretch *below*) and
 row-shift semantics match.
 
+Note on the `Home`/`End` binding: it is **not** reference-derived (the reference exposes no
+top/bottom key). It is a W4 choice, and it is now **PM-approved** — see the
+"Approval cross-check (PM evidence pointer)" above, sourced from
+`.IDE_Plans/pm-autoanswers-log.md` M2-W4 round B ("Home/End only"). So the binding is
+verified against that file rather than against the VS Code source.
+
 
 ---
 
@@ -192,13 +198,15 @@ No file outside the W4 remit was modified.
 
 ---
 
-## Defects (all low / documentation only, non-blocking)
+## Defects (documentation only, non-blocking)
 
 | ID | Severity | Defect |
 | --- | --- | --- |
 | D-1 | Low (doc) | `w4-report.md` section 2 states the `Action` enum has "exact 12 variants"; the plan and `src/app.rs` have **13**. Report mis-count only; code matches the plan. |
-| D-2 | Low (doc) | `w4-report.md` section 8 lists **Q1** (`g`/`G` vs `Home`/`End`) as an **open** question, while the W4 brief states it is user-approved. The approval is not recorded in `.IDE_Plans/`. |
+| D-2 | **RESOLVED** | `w4-report.md` section 8 still shows **Q1** (`g`/`G` vs `Home`/`End`) as **open**; the decision is now durably recorded in `.IDE_Plans/pm-autoanswers-log.md` (M2-W4 round B: "Home/End only"). No code impact — the worker report's stale line is cosmetic. |
 | D-3 | Low (doc) | `w4-report.md` section 1.2 attributes `src/main.rs` "-247 net"; `git show --stat` reports 247 changed lines (insertions + deletions mix). Wording imprecision only. |
+
+**Open low defects: 2 (D-1, D-3); D-2 resolved by the PM approval log.**
 
 No functional, contract, safety, or scope defects were found.
 
@@ -212,6 +220,6 @@ direction, C04 no-wrap branch nav, Ctrl+Arrow aliases, Home/End, 4-row expand ga
 follow-selection scroll) is met, behavior is reproduced on a real pty, three reference
 behaviors match the cited source lines, the scope guard holds (no menus/dialogs/find,
 `data.rs`/`layout` untouched), and the deviations are documented and low-severity.
-Remaining items are documentation wording only (3 low defects) and can be fixed later
-without touching code.
+Remaining items are documentation wording only (2 low defects, D-2 resolved by the PM
+approval log) and can be fixed later without touching code.
 
