@@ -51,7 +51,9 @@ use crossterm::terminal::{
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 
-use crate::app::{dialog_key, reduce, Action, AppState, ClickTarget, MenuKey, MenuNav, Outcome};
+use crate::app::{
+    dialog_key, find_key, reduce, Action, AppState, ClickTarget, MenuKey, MenuNav, Outcome,
+};
 use crate::dialog::DialogResult;
 use crate::menu::MenuSurface;
 use crate::render::glyphs::GlyphTier;
@@ -171,6 +173,15 @@ fn main() -> io::Result<()> {
                         }
                     }
                     continue;
+                }
+                // The find widget is up: a plain character is query text. The
+                // `Ctrl`/`Alt` chords return `None` here and fall through to
+                // [`keymap::action_for`], so the W6 toggles still work.
+                if state.find.visible {
+                    if let Some(find_key_event) = keymap::find_key_for(key) {
+                        find_key(&mut state, find_key_event, &repo);
+                        continue;
+                    }
                 }
                 if show_graph && keymap::opens_menu(key) {
                     state.open_menu_for_selection(0, 1);

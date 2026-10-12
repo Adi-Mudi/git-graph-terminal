@@ -112,6 +112,45 @@ pub fn dialog_key_for(key: KeyEvent) -> Option<DialogKey> {
     }
 }
 
+/// Translate a key for the **open** find widget (W7/T2).
+///
+/// While the widget owns the keyboard, a plain character is query text
+/// (`push_char`), `Backspace` edits it, `Enter`/`Shift+Enter` step through the
+/// matches, and `Esc` closes the widget and restores the pre-find selection.
+/// The W6 chords (`Ctrl+F`, `F3`, `Alt+C`…) still fall through to
+/// [`action_for`] so the existing toggles keep working while the bar is up.
+pub fn find_key_for(key: KeyEvent) -> Option<FindKey> {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    let alt = key.modifiers.contains(KeyModifiers::ALT);
+    let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+    if ctrl || alt {
+        return None;
+    }
+    match key.code {
+        KeyCode::Esc => Some(FindKey::Close),
+        KeyCode::Backspace => Some(FindKey::Backspace),
+        KeyCode::Enter if shift => Some(FindKey::Prev),
+        KeyCode::Enter => Some(FindKey::Next),
+        KeyCode::Char(c) if !shift => Some(FindKey::Char(c)),
+        _ => None,
+    }
+}
+
+/// A keypress translated for the open find widget (W7/T2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FindKey {
+    /// Append `c` to the query.
+    Char(char),
+    /// Delete the last query character.
+    Backspace,
+    /// Jump to the next match.
+    Next,
+    /// Jump to the previous match.
+    Prev,
+    /// Close the widget and restore the pre-find selection.
+    Close,
+}
+
 /// Map one key event to an [`Action`], or `None` when the key is unbound.
 ///
 /// `Alt`-modified keys are reserved: W6 claims only `Alt+C`, `Alt+R` and `Alt+D`

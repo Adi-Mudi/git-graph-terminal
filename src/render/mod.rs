@@ -181,7 +181,7 @@ pub fn find_bar(frame: &mut Frame, area: Rect, find: &FindWidget) {
     } else {
         Style::default().fg(Color::Cyan)
     };
-    let title = format!(" find [{}] ", find.counter());
+    let title = format!(" {} ", find.status_line());
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(border)

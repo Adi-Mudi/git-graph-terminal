@@ -112,6 +112,9 @@ pub struct AppState {
     pub find: FindWidget,
     /// The open modal dialog, if any (W6/T2). While `Some`, it owns the keyboard.
     pub dialog: Option<Dialog>,
+    /// The row selected before the find widget opened, restored on `Esc`
+    /// (W7/T2: `findWidget.ts:139-158` `restoreState`).
+    pub selection_before_find: Option<RowIdx>,
 }
 
 /// Every keyboard-driven state change.
@@ -398,6 +401,7 @@ impl AppState {
             cdv_focused: false,
             find: FindWidget::new(),
             dialog: None,
+            selection_before_find: None,
         }
     }
 
@@ -793,10 +797,13 @@ pub fn reduce(state: &mut AppState, action: Action, repo: &Path) -> Outcome {
 
         // W6/T1 — the find widget.
         Action::FindOpen => {
+            if !state.find.visible {
+                state.selection_before_find = Some(state.selected);
+            }
             state.find.show();
             recompute_find(state);
         }
-        Action::FindClose => state.find.close(),
+        Action::FindClose => close_find(state),
         Action::FindNext => find_step(state, true),
         Action::FindPrev => find_step(state, false),
         Action::FindToggleCase => {
@@ -937,6 +944,53 @@ fn follow_find_cdv(state: &mut AppState, repo: &Path) {
         state.selected = row as RowIdx;
         open_cdv(state, repo);
     }
+}
+
+/// Close the widget and put the selection back where it was before `Ctrl+F`
+/// (`findWidget.ts:139-158` `restoreState`; W7/T2 acceptance).
+fn close_find(state: &mut AppState) {
+    state.find.close();
+    if let Some(row) = state.selection_before_find.take() {
+        if (row as usize) < state.rows.len() {
+            state.selected = row;
+        }
+    }
+}
+
+/// Route one keypress to the open find widget (W7/T2).
+///
+/// Returns `true` when the widget consumed the key. This is the runtime half of
+/// [`FindWidget::push_char`] — W6 shipped the model, W7 gives it the keyboard.
+///
+/// `Escape` goes through [`reduce`] so the action layer stays the single place
+/// that closes the widget; the other keys edit the query, which is not an
+/// [`Action`].
+///
+/// Reference: `web/findWidget.ts:300-320` (the `keydown` listener) for the
+/// `Enter`/`Shift+Enter` step keys and `Escape` close.
+pub fn find_key(state: &mut AppState, key: crate::keymap::FindKey, repo: &Path) -> bool {
+    use crate::keymap::FindKey;
+    if !state.find.visible {
+        return false;
+    }
+    match key {
+        FindKey::Char(c) => {
+            state.find.push_char(c);
+            recompute_find(state);
+        }
+        FindKey::Backspace => {
+            state.find.pop_char();
+            recompute_find(state);
+        }
+        FindKey::Next => find_step(state, true),
+        FindKey::Prev => find_step(state, false),
+        FindKey::Close => {
+            reduce(state, Action::FindClose, repo);
+        }
+    }
+    state.sync_status();
+    state.ensure_visible();
+    true
 }
 
 /* ------------------------------------------------------------------ */
