@@ -27,9 +27,12 @@
 
 mod actions;
 mod app;
+mod branches;
 mod cdv;
 mod data;
 mod dialog;
+mod diff;
+mod editor;
 mod files;
 mod find;
 mod keymap;
@@ -38,6 +41,7 @@ mod menu;
 mod pager;
 mod render;
 mod term;
+mod uncommitted;
 mod version;
 
 use std::io::{self, Stdout, Write};
@@ -58,6 +62,7 @@ use crate::app::{
     dialog_key, find_key, pager_nav, reduce, Action, AppState, ClickTarget, MenuKey, MenuNav,
     Outcome,
 };
+use crate::branches::RefKind;
 use crate::dialog::DialogResult;
 use crate::menu::MenuSurface;
 use crate::render::ViewOptions;
@@ -130,6 +135,30 @@ fn restore_terminal(caps: &TermCaps) -> io::Result<()> {
     Ok(())
 }
 
+/// Hand the terminal to the staged editor, then resume the TUI (T6).
+///
+/// The alternate screen and raw mode come off first so the editor owns a normal
+/// terminal, and go back on afterwards. `Ok(None)` means the editor exited;
+/// `Ok(Some(message))` carries a spawn failure to the status bar, because a
+/// missing `nvim` must not take the whole UI down with it.
+fn run_editor(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    caps: &TermCaps,
+    plan: &editor::EditorPlan,
+) -> io::Result<Option<String>> {
+    let _ = restore_terminal(caps);
+    let outcome = editor::run(plan);
+    // The temp dir goes whatever the editor did, so a failed spawn cannot leak
+    // the two staged files (T6).
+    editor::cleanup(plan);
+    *terminal = setup_terminal(caps)?;
+    terminal.clear()?;
+    match outcome {
+        Ok(_) => Ok(None),
+        Err(error) => Ok(Some(format!("editor failed: {error}"))),
+    }
+}
+
 fn main() -> io::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let dump = args.iter().any(|a| a == "--dump");
@@ -183,8 +212,9 @@ fn main() -> io::Result<()> {
     }
     let show_graph = graph_requested && (!caps.dumb || dump);
     // Rows the graph view spends outside the commit body: the status bar, plus
-    // the table header the graph pane has no counterpart for.
-    let chrome = if show_graph { 2 } else { 1 };
+    // Chrome rows around the graph body: the tab bar, the table header the
+    // graph pane has no counterpart for, and the status bar.
+    let chrome = if show_graph { 3 } else { 2 };
 
     if dump {
         let view = make_view(&state, ladder, mock, show_graph);
@@ -195,6 +225,14 @@ fn main() -> io::Result<()> {
     let _guard = TerminalGuard { caps: caps.clone() };
 
     loop {
+        // A staged editor launch takes the terminal before the next draw, then
+        // the loop resumes with the selection and scroll untouched (T6).
+        if let Some(plan) = state.pending_editor.take() {
+            if let Some(message) = run_editor(&mut terminal, &caps, &plan)? {
+                state.status.error = Some(message);
+            }
+            continue;
+        }
         {
             // Refresh the viewport every frame so paging and the
             // follow-the-selection scroll know the real terminal height.
@@ -327,8 +365,16 @@ fn main() -> io::Result<()> {
                     MouseEventKind::Down(MouseButton::Left) => {
                         if let Some(hit) = hit.as_ref() {
                             match state.surface_at(mouse.column, mouse.row, hit) {
+                                Some(ClickTarget::Tab(tab)) => app::set_tab(&mut state, tab),
                                 Some(ClickTarget::Row(row, _, _)) => state.selected = row,
-                                // A click inside the docked CDV moves its cursor.
+                                // A click on a branch row moves the branch cursor
+                                // and filters the history, the same gesture as
+                                // `Enter` on that row (T2).
+                                Some(ClickTarget::Branch(index)) => {
+                                    state.branch_selected = index;
+                                    app::apply_branch_filter(&mut state, &repo);
+                                }
+                                // A click inside the inline CDV moves its cursor.
                                 Some(ClickTarget::CdvFile(path)) => {
                                     if let Some(cdv) = state.cdv.as_mut() {
                                         cdv.select_path(&path);
@@ -341,6 +387,23 @@ fn main() -> io::Result<()> {
                                 _ => {}
                             }
                         }
+                    }
+                    // The wheel scrolls the surface under the pointer (T7).
+                    MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                        let over_pane =
+                            hit.as_ref()
+                                .and_then(|hit| hit.branch_pane)
+                                .is_some_and(|pane| {
+                                    mouse.column < pane.x.saturating_add(pane.width)
+                                        && mouse.row >= pane.y
+                                        && mouse.row < pane.y.saturating_add(pane.height)
+                                });
+                        let delta = if mouse.kind == MouseEventKind::ScrollDown {
+                            app::WHEEL_LINES
+                        } else {
+                            -app::WHEEL_LINES
+                        };
+                        app::wheel_scroll(&mut state, delta, over_pane);
                     }
                     _ => {}
                 }
@@ -360,11 +423,22 @@ fn main() -> io::Result<()> {
 fn open_menu_at(state: &mut AppState, hit: Option<&app::HitGeometry>, x: u16, y: u16) {
     let target = hit.and_then(|hit| state.surface_at(x, y, hit));
     match target {
+        Some(ClickTarget::Tab(_)) => state.menu = None,
         Some(ClickTarget::ColumnHeader) => {
             state.open_menu(MenuSurface::ColumnHeader, None, x, y);
         }
         Some(ClickTarget::Row(row, surface, name)) => {
             state.selected = row;
+            state.open_menu(surface, Some(&name), x, y);
+        }
+        // A branch row keeps its checkout / merge / rebase / delete menu (T2).
+        Some(ClickTarget::Branch(index)) => {
+            state.branch_selected = index;
+            let entry = state.branches.get(index);
+            let (surface, name) = match entry {
+                Some(entry) => (branch_surface(entry.kind), entry.name.clone()),
+                None => (MenuSurface::Branch, String::new()),
+            };
             state.open_menu(surface, Some(&name), x, y);
         }
         // The `FileRow` menu acts on the row under the cursor, so the click has
@@ -379,6 +453,15 @@ fn open_menu_at(state: &mut AppState, hit: Option<&app::HitGeometry>, x: u16, y:
         // it still must not fall through to the commit-row menu (INT-050).
         Some(ClickTarget::CdvFolder(_)) => state.menu = None,
         None => state.menu = None,
+    }
+}
+
+/// The context-menu surface a ref kind opens (T2).
+fn branch_surface(kind: RefKind) -> MenuSurface {
+    match kind {
+        RefKind::Local => MenuSurface::Branch,
+        RefKind::Remote => MenuSurface::RemoteBranch,
+        RefKind::Tag => MenuSurface::Tag,
     }
 }
 

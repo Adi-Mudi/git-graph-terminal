@@ -11,8 +11,6 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Line;
 use ratatui::widgets::{Cell as TuiCell, Row as TuiRow, Table};
 
-use std::collections::HashSet;
-
 use crate::app::ColumnState;
 use crate::data::Commit;
 use crate::find::FindWidget;
@@ -86,34 +84,47 @@ pub fn header(columns: &ColumnState) -> TuiRow<'static> {
 
 /// Build the commit table for a **display-row window**.
 ///
-/// `scroll` is the first display row shown at the top of the body; `expanded`
-/// rows occupy `1 + detail_rows` display rows, so `detail_rows` empty spacer
-/// rows are appended after them. That keeps table body line `d` aligned with
-/// graph display row `d` (both driven by the same `scroll`). `selected` is an
-/// absolute commit index (not a display row). `columns` carries the W5 column
-/// visibility toggles. `find` carries the W6 find widget while it is visible, so
-/// matched characters are tinted and the current match's row is filled.
+/// `scroll` is the first display row shown at the top of the body. `heights`
+/// gives the display-row height of every commit row (M4-W12/T1: a block is
+/// `refs + commit + details + diff`), and `leading` reserves the rows the inline
+/// uncommitted section claims above the first commit (T4). `visible` is the row
+/// order the active tab shows — the Branches filter drops rows it excludes.
+///
+/// The inline content itself is painted **over** these reserved rows by
+/// [`crate::render::ui`], so this function only has to leave the right number of
+/// blank spacer rows and keep table body line `d` aligned with graph display row
+/// `d`. `selected` is an absolute commit index (not a display row). `columns`
+/// carries the W5 column visibility toggles. `find` carries the W6 find widget
+/// while it is visible, so matched characters are tinted and the current match's
+/// row is filled.
 pub fn commits_table_window(
     commits: &[Commit],
-    expanded: &HashSet<RowIdx>,
-    detail_rows: u16,
+    heights: &[u16],
+    visible: &[RowIdx],
+    leading: u16,
     scroll: u16,
     selected: Option<usize>,
     columns: &ColumnState,
     find: Option<&FindWidget>,
 ) -> Table<'static> {
     let mut body: Vec<TuiRow<'static>> = Vec::new();
-    let mut cursor: u32 = 0; // display row at the top of the current commit
+    let scroll = scroll as u32;
+    let mut cursor: u32 = leading as u32;
 
-    for (i, commit) in commits.iter().enumerate() {
-        let height = if expanded.contains(&(i as RowIdx)) {
-            1 + detail_rows as u32
-        } else {
-            1
+    // The leading block is drawn over the table, so it only needs spacers.
+    if cursor > scroll {
+        for _ in 0..(cursor - scroll) {
+            body.push(spacer_row());
+        }
+    }
+
+    for &i in visible {
+        let Some(commit) = commits.get(i as usize) else {
+            continue;
         };
+        let height = heights.get(i as usize).copied().unwrap_or(1).max(1) as u32;
         let top = cursor;
         cursor += height;
-        let scroll = scroll as u32;
         if cursor <= scroll {
             continue; // entirely above the viewport
         }
@@ -121,7 +132,7 @@ pub fn commits_table_window(
         // The row's own line is only shown when its top is in view; if it is
         // scrolled halfway off, the visible part is spacer.
         if top >= scroll {
-            body.push(commit_row(i, commit, selected, columns, find));
+            body.push(commit_row(i as usize, commit, selected, columns, find));
         }
         if height > 1 {
             let first_gap = top + 1;
@@ -297,60 +308,104 @@ mod tests {
         assert_eq!(constraints(&columns).len(), 3);
     }
 
+    /// A `heights` slice of `n` rows, all `1` except `expanded` (given `1 + extra`).
+    fn flat_heights(n: usize, expanded: &[usize], extra: u16) -> Vec<u16> {
+        (0..n)
+            .map(|i| if expanded.contains(&i) { 1 + extra } else { 1 })
+            .collect()
+    }
+
+    /// Every row index of `n` rows, in order.
+    fn all_visible(n: usize) -> Vec<RowIdx> {
+        (0..n as RowIdx).collect()
+    }
+
     #[test]
     fn table_builds_for_a_slab_of_commits() {
         let rows = vec![
             commit("aaaaaaa", 0, "root", &[]),
             commit("bbbbbbb", 86_400, "tip", &["HEAD -> main"]),
         ];
-        let no_expand = HashSet::new();
+        let heights = flat_heights(2, &[], 0);
+        let visible = all_visible(2);
         let columns = ColumnState::default();
-        let _ = commits_table_window(&rows, &no_expand, 4, 0, Some(1), &columns, None);
-        let _ = commits_table_window(&rows, &no_expand, 4, 5, None, &columns, None);
-        let _ = commits_table_window(&[], &no_expand, 4, 0, None, &columns, None);
+        let _ = commits_table_window(&rows, &heights, &visible, 0, 0, Some(1), &columns, None);
+        let _ = commits_table_window(&rows, &heights, &visible, 0, 5, None, &columns, None);
+        let _ = commits_table_window(&[], &[], &[], 0, 0, None, &columns, None);
+    }
+
+    #[test]
+    fn leading_rows_reserve_the_uncommitted_block() {
+        let rows = vec![commit("aaaaaaa", 0, "root", &[])];
+        let heights = flat_heights(1, &[], 0);
+        let visible = all_visible(1);
+        let table = commits_table_window(
+            &rows,
+            &heights,
+            &visible,
+            3,
+            0,
+            None,
+            &ColumnState::default(),
+            None,
+        );
+        let rendered = render_table(table, 60, 8);
+        let line_of = |needle: &str| -> usize {
+            rendered
+                .iter()
+                .position(|line| line.contains(needle))
+                .unwrap_or_else(|| panic!("missing {needle:?} in\n{rendered:#?}"))
+        };
+        // One header row, then three reserved leading rows, then the commit.
+        assert_eq!(line_of("aaaaaaa"), 1 + 3);
+    }
+
+    /// Render a table into a `width` x `height` test terminal, line by line.
+    fn render_table(table: Table<'static>, width: u16, height: u16) -> Vec<String> {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let backend = TestBackend::new(width, height);
+        let mut terminal =
+            Terminal::new(backend).unwrap_or_else(|e: std::convert::Infallible| match e {});
+        terminal
+            .draw(|frame| frame.render_widget(table, frame.area()))
+            .unwrap_or_else(|e: std::convert::Infallible| match e {});
+        let buffer = terminal.backend().buffer();
+        (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect()
     }
 
     #[test]
     fn expanded_rows_push_the_next_commit_down_in_the_table() {
-        use ratatui::backend::TestBackend;
-        use ratatui::Terminal;
-
         let rows = vec![
             commit("aaaaaaa", 0, "root", &[]),
             commit("bbbbbbb", 0, "mid", &[]),
             commit("ccccccc", 0, "tip", &[]),
         ];
-        let mut expanded = HashSet::new();
-        expanded.insert(1);
+        let visible = all_visible(3);
 
-        let render = |expanded: &HashSet<RowIdx>| -> Vec<String> {
+        let render = |expanded: &[usize]| -> Vec<String> {
+            let heights = flat_heights(3, expanded, 4);
             let table = commits_table_window(
                 &rows,
-                expanded,
-                4,
+                &heights,
+                &visible,
+                0,
                 0,
                 Some(1),
                 &ColumnState::default(),
                 None,
             );
-            let backend = TestBackend::new(60, 12);
-            let mut terminal =
-                Terminal::new(backend).unwrap_or_else(|e: std::convert::Infallible| match e {});
-            terminal
-                .draw(|frame| frame.render_widget(table, frame.area()))
-                .unwrap_or_else(|e: std::convert::Infallible| match e {});
-            let buffer = terminal.backend().buffer();
-            (0..buffer.area.height)
-                .map(|y| {
-                    (0..buffer.area.width)
-                        .map(|x| buffer[(x, y)].symbol().to_string())
-                        .collect::<String>()
-                })
-                .collect()
+            render_table(table, 60, 12)
         };
 
-        let collapsed = render(&HashSet::new());
-        let with_gap = render(&expanded);
+        let collapsed = render(&[]);
+        let with_gap = render(&[1]);
 
         let line_of = |lines: &[String], needle: &str| -> usize {
             lines

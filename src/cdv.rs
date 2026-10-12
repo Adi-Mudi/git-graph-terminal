@@ -704,17 +704,20 @@ fn kv(key: &Style, label: &str, text: &str, value: Style) -> Line<'static> {
     ])
 }
 
-/// The panel's height for a screen of `screen_height` rows.
-///
-/// The commit list keeps at least [`MIN_LIST_ROWS`] rows so the panel can never
-/// swallow the table.
+/// The commit list keeps at least this many rows, so the inline panel can never
+/// swallow the whole table (M4-W12).
 pub const MIN_LIST_ROWS: u16 = 4;
 
-pub fn panel_height(state: &CdvState, screen_height: u16, status_height: u16) -> u16 {
-    let available = screen_height
-        .saturating_sub(status_height)
-        .saturating_sub(MIN_LIST_ROWS);
-    state.height.min(available).max(1)
+/// The height the panel needs when it is drawn **inline**, under its commit row
+/// (M4-W12).
+///
+/// The inline panel is part of the flow, so it asks for exactly what its content
+/// needs. It is still capped by [`MIN_LIST_ROWS`] so it can never swallow the
+/// whole body.
+pub fn inline_height(state: &CdvState, body_height: u16) -> u16 {
+    let content = state.lines().len() as u16 + 2;
+    let cap = body_height.saturating_sub(MIN_LIST_ROWS).max(1);
+    content.min(cap).max(1)
 }
 
 /// Draw the panel (docked to the bottom of `area`).
@@ -1138,12 +1141,12 @@ mod tests {
 
     #[test]
     fn the_panel_never_swallows_the_commit_list() {
-        let mut state = loaded_commit(0, detail(), vec![]);
-        state.height = MAX_HEIGHT;
-        let height = panel_height(&state, 24, 1);
-        assert_eq!(height, 24 - 1 - MIN_LIST_ROWS);
-        // A short screen still yields at least one row rather than zero.
-        assert_eq!(panel_height(&state, 3, 1), 1);
+        let state = loaded_commit(0, detail(), vec![]);
+        // A tall body leaves room for the panel plus `MIN_LIST_ROWS` of table.
+        let height = inline_height(&state, 24);
+        assert!(height <= 24 - MIN_LIST_ROWS, "{height}");
+        // A short body still yields at least one row rather than zero.
+        assert_eq!(inline_height(&state, 3), 1);
     }
 
     #[test]

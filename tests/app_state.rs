@@ -48,9 +48,23 @@ mod dialog;
 #[allow(dead_code)]
 #[path = "../src/files.rs"]
 mod files;
+// M4-W12: `app.rs` owns the branch list, the uncommitted section, the inline
+// diff and the editor hand-off, so those modules come along too.
+#[allow(dead_code)]
+#[path = "../src/branches.rs"]
+mod branches;
+#[allow(dead_code)]
+#[path = "../src/diff.rs"]
+mod diff;
+#[allow(dead_code)]
+#[path = "../src/editor.rs"]
+mod editor;
 #[allow(dead_code)]
 #[path = "../src/find/mod.rs"]
 mod find;
+#[allow(dead_code)]
+#[path = "../src/uncommitted.rs"]
+mod uncommitted;
 // W7/T3: `app.rs` owns the read-only pager overlay, so its module comes along.
 #[path = "../src/pager.rs"]
 mod pager;
@@ -178,17 +192,21 @@ fn expand_and_collapse_change_the_viewport_height() {
     let mut state = AppState::load(&merge_fixture());
     let before = state.display_rows();
 
+    // Row 0 owns the `HEAD -> main` decoration, which gets its own line (T7).
+    let refs = state.block_parts(0).refs;
+    assert_eq!(refs, 1, "the fixture's tip carries a ref");
+
     state.selected = 0;
     reduce(&mut state, Action::ToggleExpand, Path::new("."));
     assert!(state.expanded.contains(&0));
     assert_eq!(state.display_rows(), before + EXPANDED_EXTRA_ROWS);
-    assert_eq!(state.row_height(0), 1 + EXPANDED_EXTRA_ROWS);
-    assert_eq!(state.row_top(1), 1 + EXPANDED_EXTRA_ROWS);
+    assert_eq!(state.row_height(0), refs + 1 + EXPANDED_EXTRA_ROWS);
+    assert_eq!(state.row_top(1), refs + 1 + EXPANDED_EXTRA_ROWS);
 
     reduce(&mut state, Action::ToggleExpand, Path::new("."));
     assert!(state.expanded.is_empty());
     assert_eq!(state.display_rows(), before, "collapse restores the height");
-    assert_eq!(state.row_height(0), 1);
+    assert_eq!(state.row_height(0), refs + 1);
 }
 
 #[test]

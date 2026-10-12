@@ -39,7 +39,6 @@ mod render {
     pub use crate::{cell, glyphs, graph_widget, mock};
 }
 
-use std::collections::HashSet;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -123,6 +122,8 @@ fn large_history_stays_inside_the_frame_budget() {
 fn render_viewport_ms(graph: &layout::GraphLayout) -> u128 {
     let backend = TestBackend::new(VIEW_COLS, VIEW_ROWS);
     let mut terminal = Terminal::new(backend).expect("TestBackend is infallible");
+    let heights = vec![1u16; graph.rows.len()];
+    let visible: Vec<u32> = (0..graph.rows.len() as u32).collect();
     let started = Instant::now();
     terminal
         .draw(|frame| {
@@ -134,8 +135,9 @@ fn render_viewport_ms(graph: &layout::GraphLayout) -> u128 {
                     selected: None,
                     uncommitted: None,
                     scroll: 0,
-                    expanded: &HashSet::new(),
-                    detail_rows: 0,
+                    leading: 0,
+                    heights: &heights,
+                    visible: &visible,
                 },
                 area,
             );

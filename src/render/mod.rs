@@ -48,9 +48,11 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
 use ratatui::Frame;
 
-use crate::app::{AppState, ColumnState, HitGeometry, EXPANDED_EXTRA_ROWS};
-use crate::cdv;
+use crate::app::{AppState, ColumnState, DiffSource, HitGeometry, Tab};
+use crate::branches::{BranchEntry, RefKind};
+use crate::cdv::{self, CdvState};
 use crate::dialog::Dialog;
+use crate::diff;
 use crate::find::FindWidget;
 use crate::layout::types::{GraphLayout, RowIdx};
 use crate::menu::ContextMenu;
@@ -101,23 +103,268 @@ impl ViewOptions<'_> {
     };
 }
 
-/// Draw the whole frame: main area + status bar + any open context menu.
+/// Height of the tab bar: one row of `Overview | Branches` (M4-W12/T1).
+pub const TAB_BAR_HEIGHT: u16 = 1;
+
+/// Width of the Branches tab's left pane, in columns (M4-W12/T2).
+///
+/// The design gives the branch list a fixed left column (`.split`'s `270px`).
+/// Narrow terminals drop the pane rather than squeeze the history — the filter
+/// keys (`[` / `]` / `b`) still work, so no capability is lost.
+pub const BRANCH_PANE_WIDTH: u16 = 30;
+
+/// Below this body width the Branches tab shows the history alone.
+const BRANCH_PANE_MIN_BODY: u16 = 56;
+
+/// The x-ranges of the tab bar's clickable labels, in `Tab::ALL` order.
+///
+/// [`tab_bar`] renders `│ 1 Overview │ 2 Branches `; this walks the same format
+/// strings so the mouse router and the renderer cannot drift apart (T1/T7).
+/// The leading `│ ` prefix is included, so the ranges are screen columns.
+pub fn tab_spans() -> Vec<(Tab, std::ops::Range<u16>)> {
+    let mut spans = Vec::new();
+    // The leading `│ ` separator the bar starts with.
+    let mut x = 2u16;
+    for index in 0.. {
+        let Some(tab) = Tab::from_index(index) else {
+            break;
+        };
+        let width = format!(" {} {} ", tab.index() + 1, tab.label())
+            .chars()
+            .count() as u16;
+        spans.push((tab, x..x + width));
+        // The ` │ ` separator before the next label.
+        x += width + 3;
+    }
+    spans
+}
+
+/// The tab whose label covers screen column `x`, or `None` (T7).
+pub fn tab_at_x(x: u16) -> Option<Tab> {
+    tab_spans()
+        .into_iter()
+        .find(|(_, span)| span.contains(&x))
+        .map(|(tab, _)| tab)
+}
+
+/// The width the Branches tab's left pane takes out of `body_width` (T2).
+///
+/// [`ui`], [`graph_view`] and [`hit_geometry`] all call this, so the drawn pane
+/// and the mouse router can never disagree.
+pub fn branch_pane_width(tab: Tab, body_width: u16) -> u16 {
+    if tab != Tab::Branches || body_width < BRANCH_PANE_MIN_BODY {
+        return 0;
+    }
+    BRANCH_PANE_WIDTH.min(body_width / 2)
+}
+
+/// What an [`InlineBlock`] is, and how to draw it.
+pub enum BlockKind<'a> {
+    /// Plain lines, no frame — the refs line and the uncommitted section.
+    Plain,
+    /// A framed panel with a title — the inline diff (M4-W12/T5).
+    Framed(String),
+    /// The commit-details panel, drawn by [`cdv::draw`] so the panel's own
+    /// border, title and scroll logic stays the single implementation.
+    Cdv(&'a CdvState),
+}
+
+/// One block of content drawn **inline** in the body, over the commit table.
+///
+/// M4-W12 replaces the docked bottom panel with blocks that sit directly under
+/// the row they belong to: the refs line above a commit (T7), the commit-details
+/// panel (T3) and the diff of the selected file (T5), plus the uncommitted
+/// section above the history (T4).
+///
+/// `commits_table_window` reserves the display rows each block occupies (see
+/// [`crate::app::AppState::block_parts`]); this type carries the content that
+/// paints them.
+pub struct InlineBlock<'a> {
+    /// First display row of the block, in body-relative coordinates.
+    pub top: u16,
+    /// The content lines (`Plain` / `Framed` only).
+    pub lines: Vec<Line<'static>>,
+    /// How to draw the block.
+    pub kind: BlockKind<'a>,
+    /// Highlight the block's first line as part of the selected row.
+    pub selected: bool,
+}
+
+/// Every inline block the current state wants painted, in draw order.
+fn inline_blocks(state: &AppState, width: u16) -> Vec<InlineBlock<'_>> {
+    let mut blocks: Vec<InlineBlock<'_>> = Vec::new();
+
+    // T4 — the uncommitted section sits above the first commit.
+    if state.tab == Tab::Overview && !state.uncommitted.is_empty() {
+        let mut lines = vec![Line::styled(
+            format!(" {} ", state.uncommitted.title()),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )];
+        lines.push(Line::styled(
+            state.uncommitted.summary_line(),
+            Style::default().fg(Color::DarkGray),
+        ));
+        if state.uncommitted_open {
+            for (index, file) in state.uncommitted.files.iter().enumerate() {
+                lines.push(uncommitted_file_line(
+                    file,
+                    state.uncommitted_selected == Some(index),
+                ));
+            }
+        }
+        blocks.push(InlineBlock {
+            top: 0,
+            lines,
+            kind: BlockKind::Plain,
+            selected: false,
+        });
+    }
+
+    // One pass over the visible rows: each block's top is the running cursor.
+    let mut cursor = state.uncommitted_height();
+    for row in state.visible_rows() {
+        let parts = state.block_parts(row);
+        let top = cursor;
+        cursor = cursor.saturating_add(parts.total);
+
+        // T7 — refs get their own line above the commit.
+        if parts.refs > 0 {
+            let refs = state
+                .rows
+                .get(row as usize)
+                .map(|commit| commit.refs.join(", "))
+                .unwrap_or_default();
+            blocks.push(InlineBlock {
+                top,
+                lines: vec![Line::styled(
+                    format!("  ({refs})"),
+                    Style::default().fg(Color::Cyan),
+                )],
+                kind: BlockKind::Plain,
+                selected: state.selected == row && state.uncommitted_selected.is_none(),
+            });
+        }
+
+        // T3 — the commit-details panel, inline under its row.
+        if parts.cdv > 0 {
+            if let Some(panel) = &state.cdv {
+                if panel.row == row {
+                    blocks.push(InlineBlock {
+                        top: top.saturating_add(parts.refs).saturating_add(parts.commit),
+                        lines: Vec::new(),
+                        kind: BlockKind::Cdv(panel),
+                        selected: false,
+                    });
+                }
+            }
+        }
+
+        // T5 — the selected file's diff, inline under the details panel.
+        if parts.diff > 0 {
+            if let Some(diff) = &state.inline_diff {
+                if diff.row() == Some(row) {
+                    blocks.push(InlineBlock {
+                        top: top
+                            .saturating_add(parts.refs)
+                            .saturating_add(parts.commit)
+                            .saturating_add(parts.cdv),
+                        lines: diff_lines(&diff.lines, width),
+                        kind: BlockKind::Framed(diff.title.clone()),
+                        selected: false,
+                    });
+                }
+            }
+        }
+    }
+
+    // T4 — the uncommitted file's diff, under the uncommitted section.
+    if state.tab == Tab::Overview {
+        if let Some(diff) = &state.inline_diff {
+            if matches!(diff.source, DiffSource::Uncommitted(_)) {
+                let top = state
+                    .uncommitted_height()
+                    .saturating_sub(diff.lines.len() as u16 + 1);
+                blocks.push(InlineBlock {
+                    top,
+                    lines: diff_lines(&diff.lines, width),
+                    kind: BlockKind::Framed(diff.title.clone()),
+                    selected: false,
+                });
+            }
+        }
+    }
+
+    blocks
+}
+
+/// One uncommitted file row: badge, path, counts, stage label (T4).
+fn uncommitted_file_line(
+    file: &crate::uncommitted::UncommittedFile,
+    selected: bool,
+) -> Line<'static> {
+    let mut style = Style::default();
+    if selected {
+        style = style.add_modifier(Modifier::BOLD | Modifier::REVERSED);
+    }
+    let letter = match file.status {
+        crate::files::GitFileStatus::Added => Color::Green,
+        crate::files::GitFileStatus::Modified => Color::Yellow,
+        crate::files::GitFileStatus::Deleted => Color::Red,
+        crate::files::GitFileStatus::Renamed => Color::Cyan,
+        crate::files::GitFileStatus::Untracked => Color::Magenta,
+    };
+    let stage = file.stage_label();
+    let mut spans = vec![
+        Span::styled(format!("  {} ", file.letter()), Style::default().fg(letter)),
+        Span::styled(file.path.clone(), style),
+    ];
+    if file.additions > 0 || file.deletions > 0 {
+        spans.push(Span::styled(
+            format!("  +{} \u{2212}{}", file.additions, file.deletions),
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
+    spans.push(Span::styled(
+        format!("  [{stage}]"),
+        Style::default().fg(Color::DarkGray),
+    ));
+    Line::from(spans)
+}
+
+/// Turn parsed diff lines into renderable lines.
+fn diff_lines(lines: &[diff::DiffLine], width: u16) -> Vec<Line<'static>> {
+    lines
+        .iter()
+        .map(|line| diff::styled_line(line, width))
+        .collect()
+}
+
+/// Draw the whole frame: tab bar + body + status bar + any open overlay.
 pub fn ui(frame: &mut Frame, state: &AppState, view: &ViewOptions<'_>) {
     let rows = overlay_rows(state, frame.area().height);
     let chunks = Layout::vertical([
+        Constraint::Length(TAB_BAR_HEIGHT),
         Constraint::Min(1),
-        Constraint::Length(rows.cdv),
         Constraint::Length(rows.find),
         Constraint::Length(STATUS_HEIGHT),
     ])
     .split(frame.area());
+    tab_bar(frame, chunks[0], state.tab, view.ladder);
     match view.graph {
-        Some(layout) => graph_view(frame, chunks[0], state, layout, view),
-        None => commit_list(frame, chunks[0], state),
-    }
-    // The docked CDV sits directly above the status bar (`#cdv.docked`).
-    if let Some(panel) = &state.cdv {
-        cdv::draw(frame, chunks[1], panel, state.cdv_focused, view.ladder);
+        Some(layout) => {
+            let pane = branch_pane_width(state.tab, chunks[1].width);
+            if pane == 0 {
+                graph_view(frame, chunks[1], state, layout, view);
+            } else {
+                let split = Layout::horizontal([Constraint::Length(pane), Constraint::Min(0)])
+                    .split(chunks[1]);
+                branch_pane(frame, split[0], state, view.ladder);
+                graph_view(frame, split[1], state, layout, view);
+            }
+        }
+        None => commit_list(frame, chunks[1], state),
     }
     if state.find.visible {
         find_bar(frame, chunks[2], &state.find, view.ladder);
@@ -138,6 +385,173 @@ pub fn ui(frame: &mut Frame, state: &AppState, view: &ViewOptions<'_>) {
     }
 }
 
+/// The tab bar: `Overview | Branches`, with the active tab highlighted (T1).
+pub fn tab_bar(frame: &mut Frame, area: Rect, active: Tab, ladder: Ladder) {
+    if area.height == 0 || area.width == 0 {
+        return;
+    }
+    let bar = ladder.glyphs().vertical;
+    let mut spans: Vec<Span<'static>> = vec![Span::styled(
+        format!("{bar} "),
+        Style::default().fg(Color::DarkGray),
+    )];
+    for (index, (tab, _)) in tab_spans().into_iter().enumerate() {
+        if index > 0 {
+            spans.push(Span::styled(
+                format!(" {bar} "),
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+        let label = format!(" {} {} ", tab.index() + 1, tab.label());
+        let style = if tab == active {
+            Style::default()
+                .bg(Color::Blue)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+        spans.push(Span::styled(label, style));
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+/// One row of the Branches tab's left pane (T2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BranchRow {
+    /// A group heading, drawn when the ref kind changes.
+    Header(RefKind),
+    /// A branch row, by index into [`AppState::branches`].
+    Entry(usize),
+}
+
+/// The pane's rows: a heading per ref kind, then that kind's entries.
+///
+/// `branches` is already sorted local → remote → tag, so a heading is emitted
+/// whenever the kind changes rather than by grouping a second time.
+pub fn branch_rows(branches: &[BranchEntry]) -> Vec<BranchRow> {
+    let mut rows = Vec::new();
+    let mut last: Option<RefKind> = None;
+    for (index, entry) in branches.iter().enumerate() {
+        if last != Some(entry.kind) {
+            rows.push(BranchRow::Header(entry.kind));
+            last = Some(entry.kind);
+        }
+        rows.push(BranchRow::Entry(index));
+    }
+    rows
+}
+
+/// The first pane row the branch list draws, so `selected` stays visible (T2).
+///
+/// [`branch_pane`] and [`crate::app::AppState::surface_at`] both call this with
+/// the same [`branch_rows`] list, so a draw and a click can never disagree.
+pub fn branch_pane_offset(rows: &[BranchRow], selected: usize, height: u16) -> usize {
+    let selected_row = rows
+        .iter()
+        .position(|row| *row == BranchRow::Entry(selected))
+        .unwrap_or(0);
+    let view = height as usize;
+    selected_row
+        .saturating_add(1)
+        .saturating_sub(view)
+        .min(rows.len().saturating_sub(view))
+}
+
+/// One branch row: `name  HEAD  N commits`, coloured by ref kind (T2).
+fn branch_line(entry: &BranchEntry, selected: bool, filtered: bool) -> Line<'static> {
+    let name_style = match entry.kind {
+        RefKind::Local if entry.is_head => Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+        RefKind::Local => Style::default().fg(Color::Cyan),
+        RefKind::Remote => Style::default().fg(Color::Magenta),
+        RefKind::Tag => Style::default().fg(Color::Yellow),
+    };
+    let mut spans = vec![Span::styled(
+        if filtered { "* " } else { "  " },
+        Style::default().fg(Color::Green),
+    )];
+    spans.push(Span::styled(entry.name.clone(), name_style));
+    if entry.is_head {
+        spans.push(Span::styled(
+            "  HEAD",
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    let suffix = if entry.count == 1 {
+        "commit"
+    } else {
+        "commits"
+    };
+    spans.push(Span::styled(
+        format!("  {} {suffix}", entry.count),
+        Style::default().fg(Color::DarkGray),
+    ));
+    let line = Line::from(spans);
+    if selected {
+        line.style(Style::default().bg(Color::Indexed(236)))
+    } else {
+        line
+    }
+}
+
+/// The Branches tab's left pane: refs grouped local → remote → tag (T2).
+///
+/// The window follows [`AppState::branch_selected`], so the cursor is always
+/// visible however long the ref list grows.
+pub fn branch_pane(frame: &mut Frame, area: Rect, state: &AppState, ladder: Ladder) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    // The last column is the pane's right border, like `.branches`'s
+    // `border-right` in the design.
+    let list = Rect {
+        width: area.width.saturating_sub(1),
+        ..area
+    };
+    let rows = branch_rows(&state.branches);
+    let view = area.height as usize;
+    let offset = branch_pane_offset(&rows, state.branch_selected, area.height);
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    for row in rows.iter().skip(offset).take(view) {
+        match row {
+            BranchRow::Header(kind) => lines.push(Line::styled(
+                format!(" {}", kind.label()),
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            BranchRow::Entry(index) => {
+                let entry = &state.branches[*index];
+                let filtered = state.branch_filter.as_deref() == Some(entry.refname.as_str());
+                lines.push(branch_line(
+                    entry,
+                    *index == state.branch_selected,
+                    filtered,
+                ));
+            }
+        }
+    }
+    frame.render_widget(Paragraph::new(lines), list);
+
+    // The separator column, drawn with the ladder's vertical glyph.
+    if area.width > list.width {
+        let border = Rect {
+            x: area.x + list.width,
+            width: 1,
+            ..area
+        };
+        let glyph = ladder.glyphs().vertical;
+        let text: Vec<Line<'static>> = (0..border.height)
+            .map(|_| Line::styled(glyph.to_string(), Style::default().fg(Color::DarkGray)))
+            .collect();
+        frame.render_widget(Paragraph::new(text), border);
+    }
+}
+
 /// Rows the W6 overlays take out of the commit body.
 ///
 /// `ui` and the event loop must agree on this number: `ui` lays the overlays out
@@ -146,20 +560,19 @@ pub fn ui(frame: &mut Frame, state: &AppState, view: &ViewOptions<'_>) {
 /// scroll) is the rows that are actually visible.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct OverlayRows {
-    /// The docked commit details view, if open.
-    pub cdv: u16,
     /// The find bar, if visible.
     pub find: u16,
+    /// The tab bar — always present since M4-W12/T1.
+    pub tabs: u16,
 }
 
 /// How many rows the overlays claim for a screen of `screen_height` rows.
-pub fn overlay_rows(state: &AppState, screen_height: u16) -> OverlayRows {
+///
+/// The commit-details panel is **not** here any more: M4-W12/T3 moved it inline,
+/// where it is part of the body flow rather than a docked strip.
+pub fn overlay_rows(state: &AppState, _screen_height: u16) -> OverlayRows {
     OverlayRows {
-        cdv: state
-            .cdv
-            .as_ref()
-            .map(|panel| cdv::panel_height(panel, screen_height, STATUS_HEIGHT))
-            .unwrap_or(0),
+        tabs: TAB_BAR_HEIGHT,
         find: if state.find.visible {
             FIND_BAR_HEIGHT
         } else {
@@ -365,31 +778,52 @@ pub fn hit_geometry(
     if width == 0 {
         return None;
     }
-    // `ui` stacks the docked CDV, the find bar and the status bar under the main
-    // area, so the main area is the screen minus exactly those rows. Deriving it
-    // from `overlay_rows` keeps the router and the renderer on one formula —
+    // `ui` stacks the tab bar, the find bar and the status bar around the body,
+    // so the table area is the screen minus exactly those rows. Deriving it from
+    // `overlay_rows` keeps the router and the renderer on one formula —
     // `status.height` alone does not know about the overlays (W10).
     let overlays = overlay_rows(state, screen_height);
-    let main_height = screen_height
-        .saturating_sub(overlays.cdv)
+    let table_height = screen_height
+        .saturating_sub(overlays.tabs)
         .saturating_sub(overlays.find)
         .saturating_sub(STATUS_HEIGHT);
-    let cdv = (overlays.cdv > 0).then_some(Rect {
+    // `body` is the whole table pane (its header included), because
+    // [`AppState::surface_at`] indexes rows relative to it and skips the header.
+    // On the Branches tab the left pane takes a column band out of it, exactly
+    // as `ui` splits it (T2).
+    let pane = branch_pane_width(state.tab, width);
+    let branch_pane = (pane > 0).then_some(Rect {
         x: 0,
-        y: main_height,
-        width,
-        height: overlays.cdv,
+        y: overlays.tabs,
+        width: pane,
+        height: table_height,
     });
+    let body = Rect {
+        x: pane,
+        y: overlays.tabs,
+        width: width.saturating_sub(pane),
+        height: table_height,
+    };
+    // The graph pane has no header, so the inline blocks sit one row lower.
+    let header = u16::from(table_height > 1);
+    let graph_body = Rect {
+        y: body.y.saturating_add(header),
+        height: table_height.saturating_sub(header),
+        ..body
+    };
+    let graph_width = text_offset(layout.max_lane).min(body.width);
     Some(HitGeometry {
-        body: Rect {
+        body,
+        graph_width,
+        has_header: table_height > 1,
+        cdv: cdv_rect(state, graph_body, graph_width),
+        branch_pane,
+        tab_bar: Rect {
             x: 0,
             y: 0,
             width,
-            height: main_height,
+            height: overlays.tabs,
         },
-        graph_width: text_offset(layout.max_lane).min(width),
-        has_header: main_height > 1,
-        cdv,
     })
 }
 
@@ -524,6 +958,13 @@ fn graph_view(
         Some(state.selected)
     };
 
+    // One display-row height per commit row, indexed by row (T1/T3/T7).
+    let heights: Vec<u16> = (0..state.rows.len() as RowIdx)
+        .map(|row| state.row_height(row))
+        .collect();
+    let visible = state.visible_rows();
+    let leading = state.uncommitted_height();
+
     frame.render_widget(
         GraphWidget {
             layout,
@@ -531,8 +972,9 @@ fn graph_view(
             selected,
             uncommitted: view.uncommitted,
             scroll: state.scroll,
-            expanded: &state.expanded,
-            detail_rows: EXPANDED_EXTRA_ROWS,
+            leading,
+            heights: &heights,
+            visible: &visible,
         },
         body,
     );
@@ -540,8 +982,9 @@ fn graph_view(
     frame.render_widget(
         commits_table_window(
             &state.rows,
-            &state.expanded,
-            EXPANDED_EXTRA_ROWS,
+            &heights,
+            &visible,
+            leading,
             state.scroll,
             selected.map(|row| row as usize),
             &state.columns,
@@ -549,6 +992,124 @@ fn graph_view(
         ),
         columns[1],
     );
+
+    // T3/T4/T5/T7 — the inline blocks paint over the rows the table reserved.
+    draw_inline_blocks(frame, body, graph_width, state, view);
+}
+
+/// Draw every inline block over the body, clipped to what is on screen.
+///
+/// A block whose top has scrolled above the body is skipped: the table already
+/// painted blank spacer rows there, and half a panel reads as corruption. A
+/// block that runs past the bottom is clipped to the body edge.
+fn draw_inline_blocks(
+    frame: &mut Frame,
+    body: Rect,
+    graph_width: u16,
+    state: &AppState,
+    view: &ViewOptions<'_>,
+) {
+    let x = body.x.saturating_add(graph_width);
+    let width = body.width.saturating_sub(graph_width);
+    if width == 0 || body.height == 0 {
+        return;
+    }
+
+    for block in inline_blocks(state, width) {
+        let top = body.y as i32 + block.top as i32 - state.scroll as i32;
+        if top < body.y as i32 {
+            continue;
+        }
+        let top = top as u16;
+        if top >= body.bottom() {
+            continue;
+        }
+        let max_height = body.bottom() - top;
+        let rect = Rect {
+            x,
+            y: top,
+            width,
+            height: max_height,
+        };
+
+        match &block.kind {
+            BlockKind::Cdv(panel) => {
+                let height = crate::cdv::inline_height(panel, body.height.max(1)).min(max_height);
+                if height == 0 {
+                    continue;
+                }
+                let rect = Rect { height, ..rect };
+                frame.render_widget(Clear, rect);
+                cdv::draw(frame, rect, panel, state.cdv_focused, view.ladder);
+            }
+            BlockKind::Framed(title) => {
+                let want = block.lines.len() as u16 + 2;
+                let height = want.min(max_height);
+                if height < 2 {
+                    continue;
+                }
+                let rect = Rect { height, ..rect };
+                let frame_block = Block::default()
+                    .borders(Borders::ALL)
+                    .border_set(view.ladder.border_set())
+                    .border_style(Style::default().fg(Color::Cyan))
+                    .title(format!(" {title} "));
+                frame.render_widget(Clear, rect);
+                frame.render_widget(Paragraph::new(block.lines).block(frame_block), rect);
+            }
+            BlockKind::Plain => {
+                if block.lines.is_empty() {
+                    continue;
+                }
+                let height = (block.lines.len() as u16).min(max_height);
+                if height == 0 {
+                    continue;
+                }
+                let rect = Rect { height, ..rect };
+                let mut lines = block.lines;
+                if block.selected {
+                    // Keep the selection a full-width bar, like the commit row.
+                    for line in &mut lines {
+                        for span in &mut line.spans {
+                            span.style = span.style.add_modifier(Modifier::REVERSED);
+                        }
+                    }
+                }
+                frame.render_widget(Paragraph::new(lines), rect);
+            }
+        }
+    }
+}
+
+/// The screen rect of the open commit-details panel, or `None` when it is not
+/// on screen. [`hit_geometry`] and [`draw_inline_blocks`] share this so the
+/// mouse router can never disagree with what was painted.
+pub fn cdv_rect(state: &AppState, body: Rect, graph_width: u16) -> Option<Rect> {
+    let panel = state.cdv.as_ref()?;
+    let row = panel.row;
+    if !state.expanded.contains(&row) {
+        return None;
+    }
+    let parts = state.block_parts(row);
+    let top = state
+        .row_top(row)
+        .saturating_add(parts.refs)
+        .saturating_add(parts.commit);
+    let y = body.y as i32 + top as i32 - state.scroll as i32;
+    if y < body.y as i32 || y >= body.bottom() as i32 {
+        return None;
+    }
+    let width = body.width.saturating_sub(graph_width);
+    if width == 0 {
+        return None;
+    }
+    let height = crate::cdv::inline_height(panel, body.height.max(1)).min(body.bottom() - y as u16);
+    (height > 0).then_some(Rect {
+        x: body.x.saturating_add(graph_width),
+        y: y as u16,
+        width,
+        height,
+    })
 }
 
 /// The status bar, including graph lane width (feature b1-W1-3) and, in graph
@@ -663,6 +1224,160 @@ mod tests {
     #[test]
     fn graph_width_uses_the_contract_pitch() {
         assert_eq!(graph_width(&demo_layout()), 4);
+    }
+
+    /// The bar's labels and the mouse router walk the same format strings, so a
+    /// click on a label's every column must land on that label (T1/T7).
+    #[test]
+    fn every_column_of_a_tab_label_maps_back_to_that_tab() {
+        for (tab, span) in tab_spans() {
+            for x in span.clone() {
+                assert_eq!(tab_at_x(x), Some(tab), "column {x} of {}", tab.label());
+            }
+        }
+    }
+
+    #[test]
+    fn a_tab_separator_is_not_a_tab() {
+        let spans = tab_spans();
+        // The `│` between the two labels, and the one the bar starts with.
+        assert_eq!(tab_at_x(0), None);
+        assert_eq!(tab_at_x(1), None);
+        let gap = spans[0].1.end;
+        assert_eq!(tab_at_x(gap), None);
+        // Past the end of the bar.
+        assert_eq!(tab_at_x(spans.last().expect("two tabs").1.end), None);
+    }
+
+    /// The drawn bar must be exactly as wide as the router thinks it is, or a
+    /// click would land on the wrong label.
+    #[test]
+    fn the_drawn_tab_bar_matches_the_click_ranges() {
+        let (text, styles) = render_tab_bar(Tab::Branches, 40);
+        let row: Vec<char> = text[0].chars().collect();
+        for (tab, span) in tab_spans() {
+            let label: String = row
+                .iter()
+                .skip(span.start as usize)
+                .take(span.len())
+                .collect();
+            assert!(
+                label.contains(tab.label()),
+                "{span:?} reads {label:?} but should hold {}",
+                tab.label()
+            );
+        }
+        // The active tab is highlighted across its whole label, and the other
+        // one is not, so the bar shows which tab is current (T1).
+        for (tab, span) in tab_spans() {
+            let active = tab == Tab::Branches;
+            for x in span {
+                let style = styles[0][x as usize];
+                assert_eq!(
+                    style.bg == Some(Color::Blue),
+                    active,
+                    "column {x} of {}",
+                    tab.label()
+                );
+            }
+        }
+    }
+
+    /// Render just the tab bar, and return the one row it draws.
+    fn render_tab_bar(active: Tab, width: u16) -> (Vec<String>, Vec<Vec<Style>>) {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let backend = TestBackend::new(width, TAB_BAR_HEIGHT);
+        let mut terminal =
+            Terminal::new(backend).unwrap_or_else(|e: std::convert::Infallible| match e {});
+        terminal
+            .draw(|frame| tab_bar(frame, frame.area(), active, Ladder::unlimited()))
+            .unwrap_or_else(|e: std::convert::Infallible| match e {});
+        let buffer = terminal.backend().buffer();
+        let text = (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol().to_string())
+                    .collect()
+            })
+            .collect();
+        let styles = (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].style())
+                    .collect()
+            })
+            .collect();
+        (text, styles)
+    }
+
+    /// The pane exists only on the Branches tab and only when there is room for
+    /// it beside the history (T2).
+    #[test]
+    fn the_branch_pane_needs_the_branches_tab_and_a_wide_terminal() {
+        assert_eq!(
+            branch_pane_width(Tab::Overview, 100),
+            0,
+            "Overview has no pane"
+        );
+        assert_eq!(branch_pane_width(Tab::Branches, 40), 0, "too narrow");
+        assert_eq!(branch_pane_width(Tab::Branches, 100), BRANCH_PANE_WIDTH);
+        // A body just wide enough for the pane halves it rather than starving
+        // the history, and never exceeds the body.
+        let pane = branch_pane_width(Tab::Branches, BRANCH_PANE_MIN_BODY);
+        assert!(pane <= BRANCH_PANE_MIN_BODY / 2, "{pane}");
+    }
+
+    /// A heading is emitted once per ref kind, and every entry keeps its index
+    /// into `AppState::branches` so a click can resolve back to it (T2).
+    #[test]
+    fn branch_rows_heads_each_ref_kind_once() {
+        use crate::branches::{BranchEntry, RefKind};
+        let entry = |name: &str, kind, is_head| BranchEntry {
+            name: name.to_string(),
+            refname: name.to_string(),
+            kind,
+            is_head,
+            count: 1,
+        };
+        let branches = vec![
+            entry("main", RefKind::Local, true),
+            entry("dev", RefKind::Local, false),
+            entry("origin/main", RefKind::Remote, false),
+            entry("v1.0", RefKind::Tag, false),
+        ];
+        assert_eq!(
+            branch_rows(&branches),
+            vec![
+                BranchRow::Header(RefKind::Local),
+                BranchRow::Entry(0),
+                BranchRow::Entry(1),
+                BranchRow::Header(RefKind::Remote),
+                BranchRow::Entry(2),
+                BranchRow::Header(RefKind::Tag),
+                BranchRow::Entry(3),
+            ]
+        );
+        assert!(branch_rows(&[]).is_empty());
+    }
+
+    /// The pane's window scrolls only as far as it must to keep the cursor on
+    /// screen, and never past the end of the list (T2).
+    #[test]
+    fn the_branch_window_follows_the_cursor() {
+        let rows: Vec<BranchRow> = (0..10).map(BranchRow::Entry).collect();
+        // The first rows need no scrolling at all.
+        assert_eq!(branch_pane_offset(&rows, 0, 4), 0);
+        assert_eq!(branch_pane_offset(&rows, 3, 4), 0);
+        // Row 4 is one past the window, so the window moves by exactly one.
+        assert_eq!(branch_pane_offset(&rows, 4, 4), 1);
+        // The last row pins the window to the bottom of the list.
+        assert_eq!(branch_pane_offset(&rows, 9, 4), 6);
+        // A window taller than the list never scrolls.
+        assert_eq!(branch_pane_offset(&rows, 9, 40), 0);
+        // An empty list is not a panic.
+        assert_eq!(branch_pane_offset(&[], 0, 4), 0);
     }
 
     #[test]

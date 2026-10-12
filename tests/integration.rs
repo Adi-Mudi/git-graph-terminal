@@ -224,6 +224,8 @@ fn render_to_text(graph: &GraphLayout) -> String {
     let height = graph.rows.len().max(1) as u16;
     let backend = TestBackend::new(width, height);
     let mut terminal = Terminal::new(backend).expect("TestBackend is infallible");
+    let heights = vec![1u16; graph.rows.len()];
+    let visible: Vec<u32> = (0..graph.rows.len() as u32).collect();
 
     terminal
         .draw(|frame| {
@@ -235,8 +237,9 @@ fn render_to_text(graph: &GraphLayout) -> String {
                     selected: None,
                     uncommitted: None,
                     scroll: 0,
-                    expanded: &HashSet::new(),
-                    detail_rows: 0,
+                    leading: 0,
+                    heights: &heights,
+                    visible: &visible,
                 },
                 area,
             );

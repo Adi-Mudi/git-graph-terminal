@@ -29,9 +29,12 @@ use std::collections::HashSet;
 use std::path::Path;
 
 use crate::actions::{self, DispatchOutcome, RefAction};
+use crate::branches::{self, BranchEntry};
 use crate::cdv::{CdvKind, CdvState};
 use crate::data::{self, Commit};
 use crate::dialog::{self, Dialog, DialogKey, DialogResult};
+use crate::diff::{self, DiffLine};
+use crate::editor::{self, EditorPlan};
 use crate::files;
 use crate::find::FindWidget;
 use crate::layout::types::{GraphLayout, RowIdx};
@@ -40,6 +43,7 @@ use crate::menu::{
     classify_ref, surface_for_refs, ColumnId, CommitOrder, ContextMenu, MenuAction, MenuColumns,
     MenuContext, MenuSurface,
 };
+use crate::uncommitted::{self, UncommittedState};
 
 /// Extra terminal rows an expanded commit row occupies in W4.
 ///
@@ -48,6 +52,91 @@ use crate::menu::{
 /// constant, so W5 can replace it with the measured commit-details pane without
 /// touching the navigation code.
 pub const EXPANDED_EXTRA_ROWS: u16 = 4;
+
+/// The two top-level views of the body (M4-W12 / T1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tab {
+    /// The uncommitted section plus the commit history.
+    Overview,
+    /// The branch list on the left, the filtered history on the right.
+    Branches,
+}
+
+impl Tab {
+    /// Both tabs, in bar order.
+    pub const ALL: [Tab; 2] = [Tab::Overview, Tab::Branches];
+
+    /// The label on the tab bar.
+    pub fn label(self) -> &'static str {
+        match self {
+            Tab::Overview => "Overview",
+            Tab::Branches => "Branches",
+        }
+    }
+
+    /// The 1-based position on the bar (the `1` / `2` key).
+    pub fn index(self) -> usize {
+        match self {
+            Tab::Overview => 0,
+            Tab::Branches => 1,
+        }
+    }
+
+    /// The tab for a `0`-based index, or `None`.
+    pub fn from_index(index: usize) -> Option<Self> {
+        Tab::ALL.get(index).copied()
+    }
+}
+
+/// Which surface an open inline diff belongs to (M4-W12 / T4, T5).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DiffSource {
+    /// A file row of the uncommitted section.
+    Uncommitted(usize),
+    /// A file row inside an expanded commit's details.
+    CommitFile {
+        /// The commit row the file belongs to.
+        row: RowIdx,
+        /// The file's path.
+        path: String,
+    },
+}
+
+/// The diff currently shown inline, under its file row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InlineDiff {
+    /// The pane title (`git diff <hash> -- <path>`).
+    pub title: String,
+    /// The parsed diff lines.
+    pub lines: Vec<DiffLine>,
+    /// Where the diff came from.
+    pub source: DiffSource,
+}
+
+impl InlineDiff {
+    /// The commit row this diff is attached to, if any.
+    pub fn row(&self) -> Option<RowIdx> {
+        match &self.source {
+            DiffSource::CommitFile { row, .. } => Some(*row),
+            DiffSource::Uncommitted(_) => None,
+        }
+    }
+}
+
+/// The vertical breakdown of one commit block, in display rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlockParts {
+    /// Rows taken by the refs line (`0` or `1`).
+    pub refs: u16,
+    /// Rows taken by the commit row itself (always `1`).
+    pub commit: u16,
+    /// Rows taken by the inline commit-details panel.
+    pub cdv: u16,
+    /// Rows taken by the inline diff.
+    pub diff: u16,
+    /// `refs + commit + cdv + diff`.
+    pub total: u16,
+}
 
 /// Everything the status bar needs, snapshotted after each [`reduce`].
 ///
@@ -119,6 +208,30 @@ pub struct AppState {
     /// The row selected before the find widget opened, restored on `Esc`
     /// (W7/T2: `findWidget.ts:139-158` `restoreState`).
     pub selection_before_find: Option<RowIdx>,
+
+    // ---- M4-W12 ----
+    /// Which body tab is showing (T1).
+    pub tab: Tab,
+    /// Every local / remote / tag ref, with its reachable-commit count (T2).
+    pub branches: Vec<BranchEntry>,
+    /// Cursor into [`AppState::branches`].
+    pub branch_selected: usize,
+    /// The active branch filter (a full refname), or `None` for all history.
+    pub branch_filter: Option<String>,
+    /// The hashes reachable from [`AppState::branch_filter`] (T2).
+    pub branch_reachable: Option<HashSet<String>>,
+    /// The working-tree section (T4).
+    pub uncommitted: UncommittedState,
+    /// Is the uncommitted section expanded?
+    pub uncommitted_open: bool,
+    /// The selected uncommitted file, when the cursor is in that section.
+    pub uncommitted_selected: Option<usize>,
+    /// The inline diff currently open, if any (T4/T5).
+    pub inline_diff: Option<InlineDiff>,
+    /// The editor to hand `e` to, from `$GGT_EDITOR` (T6).
+    pub editor_program: Option<String>,
+    /// A staged editor launch for `main.rs` to run after the frame (T6).
+    pub pending_editor: Option<EditorPlan>,
 }
 
 /// Every keyboard-driven state change.
@@ -214,6 +327,26 @@ pub enum Action {
     CdvFileCopyAbsolutePath,
     /// Copy the repo-relative path of the selected file row — `Y` (A73).
     CdvFileCopyRelativePath,
+
+    // M4-W12 — the tabs, the uncommitted section and the inline diff.
+    /// Switch to the Overview tab — `1`.
+    TabOverview,
+    /// Switch to the Branches tab — `2`.
+    TabBranches,
+    /// Cycle to the other tab — `Ctrl+Tab`.
+    TabToggle,
+    /// Move the branch-list cursor down — `]` (also `j` on the Branches tab).
+    BranchNext,
+    /// Move the branch-list cursor up — `[` (also `k` on the Branches tab).
+    BranchPrev,
+    /// Filter the history on the selected branch — `Enter` on the branch list.
+    BranchFilter,
+    /// Toggle the uncommitted section open/closed and jump to it — `u`.
+    UncommittedToggle,
+    /// Open the diff for the selected inline file row — `Enter`.
+    InlineFileOpenDiff,
+    /// Open the selected file's two revisions in `$GGT_EDITOR` — `e`.
+    EditorOpen,
 }
 
 impl Action {
@@ -266,6 +399,15 @@ impl Action {
         Action::CdvFileResetToRevision,
         Action::CdvFileCopyAbsolutePath,
         Action::CdvFileCopyRelativePath,
+        Action::TabOverview,
+        Action::TabBranches,
+        Action::TabToggle,
+        Action::BranchNext,
+        Action::BranchPrev,
+        Action::BranchFilter,
+        Action::UncommittedToggle,
+        Action::InlineFileOpenDiff,
+        Action::EditorOpen,
     ];
 }
 
@@ -392,27 +534,37 @@ pub struct HitGeometry {
     pub graph_width: u16,
     /// Does the area start with a one-row table header?
     pub has_header: bool,
-    /// The docked commit-details panel (`chunks[1]`), when it is open (W10).
+    /// The inline commit-details panel, when it is open (W6/T3).
     /// `None` means no CDV is drawn, so no cell can belong to it.
     pub cdv: Option<ratatui::layout::Rect>,
+    /// The tab bar, always drawn since M4-W12/T1.
+    pub tab_bar: ratatui::layout::Rect,
+    /// The Branches tab's left pane, when that tab is active and the terminal is
+    /// wide enough to show it (M4-W12/T2). `None` means no cell is a branch row.
+    pub branch_pane: Option<ratatui::layout::Rect>,
 }
 
 /// What a screen cell belongs to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClickTarget {
+    /// A tab-bar label → switch to that tab (M4-W12/T1, T7).
+    Tab(Tab),
     /// The table header row, right of the graph → column menu.
     ColumnHeader,
     /// A commit row, with the surface its refs (or its position) imply.
     Row(RowIdx, MenuSurface, String),
-    /// A file row in the docked commit-details view, with its full path — the
+    /// A file row in the inline commit-details view, with its full path — the
     /// `MenuSurface::FileRow` menu (A65…A73, W10).
     CdvFile(String),
-    /// A folder row in the docked commit-details view, with its full path.
+    /// A folder row in the inline commit-details view, with its full path.
     ///
     /// The `FileRow` menu is file-only, so a folder opens no menu: the reference
     /// binds a click on `.fileTreeFolder` to the open/closed flip instead
     /// (`web/main.ts:2968-2978`), which is INT-050.
     CdvFolder(String),
+    /// A branch row in the Branches tab's left pane, by index into
+    /// [`AppState::branches`] (M4-W12/T2).
+    Branch(usize),
 }
 
 impl AppState {
@@ -420,7 +572,6 @@ impl AppState {
     pub fn load(repo: &Path) -> Self {
         let mut error: Option<String> = None;
         let mut rows: Vec<Commit> = Vec::new();
-        let mut branches = 0usize;
         let mut branch = "(detached HEAD)".to_string();
         let mut head = "(no commits)".to_string();
 
@@ -429,9 +580,8 @@ impl AppState {
         } else {
             // Error priority mirrors the P0 `App::load`: branches, then commits,
             // then HEAD only when nothing else has failed.
-            match data::branches(repo) {
-                Ok(list) => branches = list.len(),
-                Err(e) => error = Some(e.to_string()),
+            if let Err(e) = data::branches(repo) {
+                error = Some(e.to_string());
             }
             match data::commits(repo) {
                 Ok(list) => rows = list,
@@ -450,14 +600,19 @@ impl AppState {
         }
 
         let layout = layout::layout(&rows, &LayoutOpts::default());
+        let uncommitted = uncommitted::UncommittedState::load(repo).unwrap_or_default();
+        let branch_list = branches::load(repo).unwrap_or_default();
+        let branch_count = branch_list.len();
         Self::from_parts(
             rows,
             layout,
             branch,
             head,
-            branches,
+            branch_count,
             repo_label(repo),
             error,
+            uncommitted,
+            branch_list,
         )
     }
 
@@ -472,10 +627,79 @@ impl AppState {
             2,
             "(mock)".to_string(),
             None,
+            Self::demo_uncommitted(),
+            Self::demo_branches(),
         )
     }
 
+    /// The `--mock` uncommitted section (M4-W12/T4): one file per legend letter, so
+    /// the section renders every row variant without a working tree.
+    fn demo_uncommitted() -> UncommittedState {
+        use crate::files::GitFileStatus;
+        use crate::uncommitted::UncommittedFile;
+        let file = |status, path: &str, staged, unstaged, adds, dels| UncommittedFile {
+            status,
+            path: path.to_string(),
+            old_path: path.to_string(),
+            staged,
+            unstaged,
+            additions: adds,
+            deletions: dels,
+        };
+        UncommittedState {
+            files: vec![
+                file(
+                    GitFileStatus::Modified,
+                    "src/render/ui.rs",
+                    true,
+                    true,
+                    42,
+                    8,
+                ),
+                file(
+                    GitFileStatus::Added,
+                    "src/render/tabs.rs",
+                    false,
+                    true,
+                    120,
+                    0,
+                ),
+                file(
+                    GitFileStatus::Deleted,
+                    "src/legacy/panel.rs",
+                    true,
+                    false,
+                    0,
+                    65,
+                ),
+            ],
+        }
+    }
+
+    /// The `--mock` branch list (M4-W12/T2).
+    fn demo_branches() -> Vec<BranchEntry> {
+        use crate::branches::RefKind;
+        let entry = |name: &str, kind, is_head, count| BranchEntry {
+            name: name.to_string(),
+            refname: match kind {
+                RefKind::Tag => format!("refs/tags/{name}"),
+                RefKind::Remote => format!("refs/remotes/{name}"),
+                RefKind::Local => format!("refs/heads/{name}"),
+            },
+            kind,
+            is_head,
+            count,
+        };
+        vec![
+            entry("main", RefKind::Local, true, 8),
+            entry("feature/graph", RefKind::Local, false, 4),
+            entry("origin/main", RefKind::Remote, false, 8),
+            entry("v0.1", RefKind::Tag, false, 5),
+        ]
+    }
+
     /// Assemble a state from already-loaded pieces.
+    #[allow(clippy::too_many_arguments)]
     fn from_parts(
         rows: Vec<Commit>,
         layout: GraphLayout,
@@ -484,6 +708,8 @@ impl AppState {
         branches: usize,
         repo_label: String,
         error: Option<String>,
+        uncommitted: UncommittedState,
+        branch_list: Vec<BranchEntry>,
     ) -> Self {
         let status = StatusBarState {
             repo_label,
@@ -516,32 +742,129 @@ impl AppState {
             pager: None,
             compare_base: None,
             selection_before_find: None,
+            tab: Tab::Overview,
+            branches: branch_list,
+            branch_selected: 0,
+            branch_filter: None,
+            branch_reachable: None,
+            uncommitted,
+            uncommitted_open: true,
+            uncommitted_selected: None,
+            inline_diff: None,
+            editor_program: editor::program_from_env(),
+            pending_editor: None,
         }
     }
 
-    /// Terminal height of commit row `row`: `1`, or `1 + EXPANDED_EXTRA_ROWS`.
+    /// The vertical breakdown of commit row `row` (T1/T3/T7).
+    pub fn block_parts(&self, row: RowIdx) -> BlockParts {
+        let refs = u16::from(self.has_refs_line(row));
+        let cdv = self.inline_cdv_height(row);
+        let diff = self.inline_diff_height(row);
+        BlockParts {
+            refs,
+            commit: 1,
+            cdv,
+            diff,
+            total: refs + 1 + cdv + diff,
+        }
+    }
+
+    /// Does `row` get its own refs line above the commit (T7)?
+    pub fn has_refs_line(&self, row: RowIdx) -> bool {
+        self.rows
+            .get(row as usize)
+            .map(|commit| !commit.refs.is_empty())
+            .unwrap_or(false)
+    }
+
+    /// Rows the inline commit-details panel occupies under `row`.
+    ///
+    /// An expanded row reserves at least the reference gap even before its
+    /// details have loaded — and even when the viewport is not known yet, as it
+    /// is not outside the TUI — so the layout never jumps when the panel arrives
+    /// (W4 contract).
+    pub fn inline_cdv_height(&self, row: RowIdx) -> u16 {
+        if !self.expanded.contains(&row) {
+            return 0;
+        }
+        match &self.cdv {
+            Some(panel) if panel.row == row => {
+                crate::cdv::inline_height(panel, self.status.height.max(1)).max(EXPANDED_EXTRA_ROWS)
+            }
+            _ => EXPANDED_EXTRA_ROWS,
+        }
+    }
+
+    /// Rows the inline diff occupies under `row`.
+    pub fn inline_diff_height(&self, row: RowIdx) -> u16 {
+        match &self.inline_diff {
+            Some(diff) if diff.row() == Some(row) => diff.lines.len() as u16 + 1,
+            _ => 0,
+        }
+    }
+
+    /// Rows the uncommitted section occupies at the top of the body (T4).
+    ///
+    /// The Branches tab has no uncommitted section, so it contributes nothing.
+    pub fn uncommitted_height(&self) -> u16 {
+        if self.tab != Tab::Overview || self.uncommitted.is_empty() {
+            return 0;
+        }
+        // header + summary
+        let mut height = 2u16;
+        if self.uncommitted_open {
+            height = height.saturating_add(self.uncommitted.len() as u16);
+        }
+        if let Some(diff) = &self.inline_diff {
+            if matches!(diff.source, DiffSource::Uncommitted(_)) {
+                height = height.saturating_add(diff.lines.len() as u16 + 1);
+            }
+        }
+        height
+    }
+
+    /// The commit rows the current tab shows, in order.
+    ///
+    /// The Overview tab shows every row; the Branches tab shows only the rows
+    /// reachable from the active branch filter (T2).
+    pub fn visible_rows(&self) -> Vec<RowIdx> {
+        match (self.tab, &self.branch_reachable) {
+            (Tab::Branches, Some(set)) => branches::filter_rows(
+                self.rows
+                    .iter()
+                    .enumerate()
+                    .map(|(index, commit)| (index, commit.hash.as_str())),
+                set,
+            )
+            .into_iter()
+            .map(|index| index as RowIdx)
+            .collect(),
+            _ => (0..self.rows.len() as RowIdx).collect(),
+        }
+    }
+
+    /// Terminal height of commit row `row`: its whole block (T1/T3/T7).
     pub fn row_height(&self, row: RowIdx) -> u16 {
-        if self.expanded.contains(&row) {
-            1 + EXPANDED_EXTRA_ROWS
-        } else {
-            1
-        }
+        self.block_parts(row).total
     }
 
-    /// Display-row offset (top) of commit row `row`.
+    /// Display-row offset (top) of commit row `row`, below the uncommitted block.
     pub fn row_top(&self, row: RowIdx) -> u16 {
-        let last = row.min(self.rows.len() as RowIdx);
-        let mut top = 0u16;
-        for r in 0..last {
+        let mut top = self.uncommitted_height();
+        for r in self.visible_rows() {
+            if r >= row {
+                break;
+            }
             top = top.saturating_add(self.row_height(r));
         }
         top
     }
 
-    /// Total display rows the commit list occupies.
+    /// Total display rows the body occupies.
     pub fn display_rows(&self) -> u16 {
-        let mut total = 0u16;
-        for r in 0..self.rows.len() as RowIdx {
+        let mut total = self.uncommitted_height();
+        for r in self.visible_rows() {
             total = total.saturating_add(self.row_height(r));
         }
         total
@@ -803,8 +1126,8 @@ impl AppState {
 
     /// The commit row occupying display row `display`, if any.
     pub fn row_at_display(&self, display: u16) -> Option<RowIdx> {
-        let mut cursor = 0u16;
-        for row in 0..self.rows.len() as RowIdx {
+        let mut cursor = self.uncommitted_height();
+        for row in self.visible_rows() {
             let height = self.row_height(row);
             if display >= cursor && display < cursor.saturating_add(height) {
                 return Some(row);
@@ -816,10 +1139,30 @@ impl AppState {
 
     /// Route a screen cell back to a click target (mouse right-click support).
     pub fn surface_at(&self, x: u16, y: u16, hit: &HitGeometry) -> Option<ClickTarget> {
-        // The docked CDV is its own surface and sits *below* the table body, so
-        // it is checked first: a cell inside the panel must never be read as a
-        // commit row (W10). A summary line or a cell outside the panel's inner
-        // rect falls through to the body checks below, which exclude the panel.
+        // The tab bar sits above the body, so it is checked first: a cell there
+        // must never be read as a commit row (T1/T7).
+        let bar = hit.tab_bar;
+        if bar.height > 0
+            && y >= bar.y
+            && y < bar.y.saturating_add(bar.height)
+            && x < bar.x.saturating_add(bar.width)
+        {
+            return crate::render::tab_at_x(x).map(ClickTarget::Tab);
+        }
+        // The Branches tab's left pane is its own surface, to the left of the
+        // body: a cell inside it is a branch row, never a commit row (T2).
+        if let Some(pane) = hit.branch_pane {
+            if x < pane.x.saturating_add(pane.width)
+                && y >= pane.y
+                && y < pane.y.saturating_add(pane.height)
+            {
+                return self.branch_at(x, y, pane);
+            }
+        }
+        // The inline CDV is part of the body flow, so it is checked before the
+        // commit rows it is embedded in: a cell inside the panel must never be
+        // read as a commit row (W6/T3). A summary line or a cell outside the
+        // panel's inner rect falls through to the body checks below.
         if let Some(cdv) = hit.cdv {
             if let Some(target) = self.cdv_file_at(x, y, cdv) {
                 return Some(target);
@@ -866,7 +1209,22 @@ impl AppState {
         ))
     }
 
-    /// The file row under `(x, y)` inside the docked CDV, or `None` (W10).
+    /// The branch row under `(x, y)` in the Branches tab's left pane, or `None`.
+    ///
+    /// The pane draws [`crate::render::branch_rows`] top-down, so the row index
+    /// inside the pane maps straight onto that list; a group heading is not a
+    /// row and resolves to `None` (T2).
+    fn branch_at(&self, _x: u16, y: u16, pane: ratatui::layout::Rect) -> Option<ClickTarget> {
+        let rows = crate::render::branch_rows(&self.branches);
+        let offset = crate::render::branch_pane_offset(&rows, self.branch_selected, pane.height);
+        let index = usize::from(y.saturating_sub(pane.y)).checked_add(offset)?;
+        match rows.get(index)? {
+            crate::render::BranchRow::Entry(entry) => Some(ClickTarget::Branch(*entry)),
+            crate::render::BranchRow::Header(_) => None,
+        }
+    }
+
+    /// The file row under `(x, y)` inside the inline CDV, or `None` (W6/T3).
     ///
     /// The panel renders [`CdvState::lines`], whose first
     /// `summary_lines().len() + 2` lines are the summary block plus the
@@ -926,21 +1284,52 @@ fn clipboard_text(id: &str, ctx: &MenuContext) -> String {
 /// which re-reads the repository through [`AppState::load`].
 pub fn reduce(state: &mut AppState, action: Action, repo: &Path) -> Outcome {
     match action {
-        Action::Quit => return Outcome::Quit,
-        Action::SelectNext => select_table(state, 1),
-        Action::SelectPrev => select_table(state, -1),
+        Action::Quit => {
+            // Esc closes the innermost thing first: an inline diff, then the
+            // branch filter, and only then the app.
+            if state.inline_diff.is_some() {
+                state.inline_diff = None;
+            } else if state.tab == Tab::Branches && state.branch_filter.is_some() {
+                clear_branch_filter(state);
+            } else {
+                return Outcome::Quit;
+            }
+        }
+        Action::SelectNext => {
+            if state.tab == Tab::Branches {
+                select_branch_entry(state, 1);
+            } else {
+                select_table(state, 1);
+            }
+        }
+        Action::SelectPrev => {
+            if state.tab == Tab::Branches {
+                select_branch_entry(state, -1);
+            } else {
+                select_table(state, -1);
+            }
+        }
         Action::PageNext => select_page(state, 1),
         Action::PagePrev => select_page(state, -1),
-        Action::Top => state.selected = 0,
-        Action::Bottom => state.selected = state.rows.len().saturating_sub(1) as RowIdx,
+        Action::Top => state.selected = state.visible_rows().first().copied().unwrap_or(0),
+        Action::Bottom => {
+            state.selected = state.visible_rows().last().copied().unwrap_or(0);
+        }
         Action::ToggleExpand => {
-            toggle_expand(state);
-            // W6/T3: expanding a row loads its commit details view; collapsing
-            // it (or expanding a different row) closes or replaces the panel.
-            if state.expanded.contains(&state.selected) {
-                open_cdv(state, repo);
+            if state.tab == Tab::Branches {
+                apply_branch_filter(state, repo);
+            } else if state.uncommitted_selected.is_some() {
+                open_inline_uncommitted_diff(state, repo);
             } else {
-                close_cdv_for(state, state.selected);
+                toggle_expand(state);
+                // W6/T3: expanding a row loads its commit details view;
+                // collapsing it (or expanding a different row) closes or
+                // replaces the panel.
+                if state.expanded.contains(&state.selected) {
+                    open_cdv(state, repo);
+                } else {
+                    close_cdv_for(state, state.selected);
+                }
             }
         }
         // Right / Ctrl+Down follows the first parent (older, `graph.ts:598-603`).
@@ -1016,6 +1405,25 @@ pub fn reduce(state: &mut AppState, action: Action, repo: &Path) -> Outcome {
         // W7/T4 — the uncommitted and comparison CDV kinds.
         Action::CdvOpenUncommitted => open_uncommitted_cdv(state, repo),
         Action::CompareMark => compare_mark(state, repo),
+
+        // M4-W12 — the tabs, the branch list, the uncommitted section and the
+        // inline diff (T1, T2, T4, T5, T6).
+        Action::TabOverview => set_tab(state, Tab::Overview),
+        Action::TabBranches => set_tab(state, Tab::Branches),
+        Action::TabToggle => set_tab(
+            state,
+            if state.tab == Tab::Overview {
+                Tab::Branches
+            } else {
+                Tab::Overview
+            },
+        ),
+        Action::BranchNext => select_branch_entry(state, 1),
+        Action::BranchPrev => select_branch_entry(state, -1),
+        Action::BranchFilter => apply_branch_filter(state, repo),
+        Action::UncommittedToggle => toggle_uncommitted(state),
+        Action::InlineFileOpenDiff => open_inline_file_diff(state, repo),
+        Action::EditorOpen => stage_editor(state, repo),
     }
     state.sync_status();
     state.ensure_visible();
@@ -1023,24 +1431,58 @@ pub fn reduce(state: &mut AppState, action: Action, repo: &Path) -> Outcome {
 }
 
 /// Table-order movement (inventory C03): clamps at both ends, never wraps.
+///
+/// M4-W12: the uncommitted section sits above the commit table, so the cursor
+/// walks into it on `k` at the first commit and out of it on `j` at the last
+/// file — one continuous list, like the reference's virtual first row.
 fn select_table(state: &mut AppState, delta: i32) {
-    if state.rows.is_empty() {
+    let visible = state.visible_rows();
+    if visible.is_empty() {
         return;
     }
-    let last = (state.rows.len() - 1) as i32;
-    let next = (state.selected as i32 + delta).clamp(0, last);
-    state.selected = next as RowIdx;
+    if let Some(index) = state.uncommitted_selected {
+        let last = state.uncommitted.len().saturating_sub(1) as i32;
+        let next = index as i32 + delta;
+        if next < 0 {
+            return;
+        }
+        if next > last {
+            state.uncommitted_selected = None;
+            state.selected = visible[0];
+            return;
+        }
+        state.uncommitted_selected = Some(next as usize);
+        return;
+    }
+    let position = visible
+        .iter()
+        .position(|row| *row == state.selected)
+        .unwrap_or(0) as i32;
+    let next = position + delta;
+    if next < 0 {
+        if state.uncommitted_open && !state.uncommitted.is_empty() {
+            state.uncommitted_selected = Some(state.uncommitted.len() - 1);
+        }
+        return;
+    }
+    let last = (visible.len() - 1) as i32;
+    state.selected = visible[next.min(last) as usize];
 }
 
 /// Page movement: `PageDown = viewport height - 1` (clamped).
 fn select_page(state: &mut AppState, dir: i32) {
-    if state.rows.is_empty() {
+    let visible = state.visible_rows();
+    if visible.is_empty() {
         return;
     }
     let page = state.status.height.max(1).saturating_sub(1).max(1) as i32;
-    let last = (state.rows.len() - 1) as i32;
-    let next = (state.selected as i32 + dir * page).clamp(0, last);
-    state.selected = next as RowIdx;
+    let position = visible
+        .iter()
+        .position(|row| *row == state.selected)
+        .unwrap_or(0) as i32;
+    let last = (visible.len() - 1) as i32;
+    let next = (position + dir * page).clamp(0, last);
+    state.selected = visible[next as usize];
 }
 
 fn toggle_expand(state: &mut AppState) {
@@ -1050,6 +1492,180 @@ fn toggle_expand(state: &mut AppState) {
     let row = state.selected;
     if !state.expanded.remove(&row) {
         state.expanded.insert(row);
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/* M4-W12 — tabs, branches, uncommitted, inline diff                   */
+/* ------------------------------------------------------------------ */
+
+/// Switch tabs and keep the selection valid for the new tab (T1).
+/// Switch to `tab`, moving the cursor into whichever list that tab shows (T1).
+///
+/// Public because the mouse router switches tabs on a tab-bar click, the same
+/// gesture the `1` / `2` keys perform.
+pub fn set_tab(state: &mut AppState, tab: Tab) {
+    if state.tab == tab {
+        return;
+    }
+    state.tab = tab;
+    state.scroll = 0;
+    state.inline_diff = None;
+    state.uncommitted_selected = None;
+    state.selected = state.visible_rows().first().copied().unwrap_or(0);
+}
+
+/// Rows one mouse-wheel notch moves.
+pub const WHEEL_LINES: i32 = 3;
+
+/// Mouse-wheel scrolling: [`WHEEL_LINES`] per notch, clamped at both ends.
+///
+/// The wheel scrolls the surface under the pointer (T7). Over the Branches
+/// tab's left pane it walks the branch cursor instead, because that pane has no
+/// scroll offset of its own — its window follows the cursor (T2).
+pub fn wheel_scroll(state: &mut AppState, delta: i32, over_branch_pane: bool) {
+    if over_branch_pane && state.tab == Tab::Branches {
+        // One entry per notch: a wheel walks a list, it does not page it.
+        select_branch_entry(state, delta.signum());
+        return;
+    }
+    let view = state.status.height.max(1);
+    let max = state.display_rows().saturating_sub(view) as i32;
+    state.scroll = (state.scroll as i32 + delta).clamp(0, max) as u16;
+}
+
+/// Move the branch-list cursor (clamped, like the table cursor).
+fn select_branch_entry(state: &mut AppState, delta: i32) {
+    if state.branches.is_empty() {
+        return;
+    }
+    let last = (state.branches.len() - 1) as i32;
+    state.branch_selected = (state.branch_selected as i32 + delta).clamp(0, last) as usize;
+}
+
+/// `Enter` on the branch list: filter the history to that ref (T2).
+///
+/// Public because the mouse router applies the filter on a click, the same
+/// gesture the `Enter` key performs.
+pub fn apply_branch_filter(state: &mut AppState, repo: &Path) {
+    let Some(entry) = state.branches.get(state.branch_selected) else {
+        return;
+    };
+    let refname = entry.refname.clone();
+    let name = entry.label();
+    match branches::reachable(repo, &refname) {
+        Ok(set) => {
+            state.branch_filter = Some(refname);
+            state.branch_reachable = Some(set);
+            state.status.last_action = Some(format!("history filtered to {name}"));
+        }
+        Err(error) => {
+            state.status.error = Some(error.to_string());
+            return;
+        }
+    }
+    state.selected = state.visible_rows().first().copied().unwrap_or(0);
+    state.scroll = 0;
+    state.inline_diff = None;
+}
+
+/// `Esc` on the Branches tab: drop the filter and show all history again.
+fn clear_branch_filter(state: &mut AppState) {
+    state.branch_filter = None;
+    state.branch_reachable = None;
+    state.selected = 0;
+    state.scroll = 0;
+    state.inline_diff = None;
+}
+
+/// `u` — jump into the uncommitted section, or collapse it (T4).
+fn toggle_uncommitted(state: &mut AppState) {
+    if state.uncommitted.is_empty() {
+        state.status.last_action = Some("No uncommitted changes.".to_string());
+        return;
+    }
+    if state.uncommitted_selected.is_none() {
+        state.uncommitted_selected = Some(0);
+        state.uncommitted_open = true;
+        return;
+    }
+    if state.uncommitted_open {
+        state.uncommitted_open = false;
+        state.uncommitted_selected = None;
+        state.inline_diff = None;
+    } else {
+        state.uncommitted_open = true;
+    }
+}
+
+/// Move the inline file-row cursor (T4): the details file list while `Tab` has
+/// focused it, otherwise the uncommitted file list.
+/// `Enter` on an uncommitted file row: open its diff inline (T4).
+fn open_inline_uncommitted_diff(state: &mut AppState, repo: &Path) {
+    let Some(index) = state.uncommitted_selected else {
+        return;
+    };
+    let Some(file) = state.uncommitted.files.get(index) else {
+        return;
+    };
+    let path = file.path.clone();
+    let mut text = data::run_git(repo, &["diff", "HEAD", "--", &path]).unwrap_or_default();
+    if text.trim().is_empty() {
+        // Untracked file: diff the worktree copy against `/dev/null` so a new
+        // file still gets a body instead of an empty pane.
+        text = data::run_git(repo, &["diff", "--no-index", "--", "/dev/null", &path])
+            .unwrap_or_default();
+    }
+    state.inline_diff = Some(InlineDiff {
+        title: format!("git diff HEAD -- {path}"),
+        lines: diff::parse(&text),
+        source: DiffSource::Uncommitted(index),
+    });
+}
+
+/// `Enter` on a details file row: open its diff inline under the commit (T5).
+fn open_inline_file_diff(state: &mut AppState, repo: &Path) {
+    let Some(panel) = state.cdv.as_ref() else {
+        return;
+    };
+    let Some(path) = panel.selected_path() else {
+        return;
+    };
+    let row = panel.row;
+    let hash = panel.hash.clone();
+    let text = data::run_git(repo, &["show", "--format=", "--patch", &hash, "--", &path])
+        .unwrap_or_default();
+    state.inline_diff = Some(InlineDiff {
+        title: format!("git show {hash} -- {path}"),
+        lines: diff::parse(&text),
+        source: DiffSource::CommitFile { row, path },
+    });
+}
+
+/// `e` — stage the selected file's two revisions and hand them to
+/// `$GGT_EDITOR` (T6). `main.rs` runs [`AppState::pending_editor`] after the
+/// frame, once the terminal is back to its normal mode.
+fn stage_editor(state: &mut AppState, repo: &Path) {
+    let Some(program) = state.editor_program.clone() else {
+        state.status.last_action = Some("Set $GGT_EDITOR to open a diff editor.".to_string());
+        return;
+    };
+    let Some(panel) = state.cdv.as_ref() else {
+        state.status.last_action = Some("Open commit details first (d), then press e.".to_string());
+        return;
+    };
+    let Some(path) = panel.selected_path() else {
+        return;
+    };
+    let hash = panel.hash.clone();
+    let old = data::run_git(repo, &["show", &format!("{hash}^:{path}")]).unwrap_or_default();
+    let new = data::run_git(repo, &["show", &format!("{hash}:{path}")]).unwrap_or_default();
+    match editor::stage(&program, &path, &old, &new) {
+        Ok(plan) => {
+            state.status.last_action = Some(format!("opening {path}: {}", plan.command_line()));
+            state.pending_editor = Some(plan);
+        }
+        Err(error) => state.status.error = Some(error.to_string()),
     }
 }
 
@@ -1606,6 +2222,7 @@ fn repo_label(repo: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::branches::RefKind;
     use std::fs;
     use std::path::PathBuf;
 
@@ -1656,6 +2273,8 @@ mod tests {
             1,
             "(test)".to_string(),
             None,
+            crate::uncommitted::UncommittedState::default(),
+            Vec::new(),
         )
     }
 
@@ -1778,20 +2397,18 @@ mod tests {
     #[test]
     fn viewport_follows_the_selection() {
         let mut state = state_of(linear(30));
-        state.status.height = 10; // 10 visible rows, rows 0..9
+        state.status.height = 10; // 10 visible rows
         assert_eq!(state.scroll, 0);
 
+        // Row 0 carries a refs line (T7), so the history is 31 display rows and
+        // row 10 ends at display row 12 — one row past the window, not two.
         state.selected = 9;
         reduce(&mut state, Action::SelectNext, Path::new("."));
         assert_eq!(state.selected, 10);
-        assert_eq!(state.scroll, 1, "row 10 scrolls the window by one");
+        assert_eq!(state.scroll, 2, "row 10 scrolls the window to its bottom");
 
         reduce(&mut state, Action::Bottom, Path::new("."));
-        assert_eq!(
-            state.scroll,
-            29 + 1 - 10,
-            "anchors the last row to the bottom"
-        );
+        assert_eq!(state.scroll, 31 - 10, "anchors the last row to the bottom");
 
         reduce(&mut state, Action::Top, Path::new("."));
         assert_eq!(state.scroll, 0);
@@ -1800,15 +2417,16 @@ mod tests {
     #[test]
     fn expanded_rows_reserve_the_reference_gap() {
         let mut state = state_of(linear(5));
-        assert_eq!(state.row_height(0), 1);
-        assert_eq!(state.display_rows(), 5);
+        // Row 0 carries the `HEAD -> main` ref, which now gets its own line (T7).
+        assert_eq!(state.row_height(0), 2);
+        assert_eq!(state.display_rows(), 6);
 
         state.expanded.insert(1);
         assert_eq!(state.row_height(1), 1 + EXPANDED_EXTRA_ROWS);
         assert_eq!(state.row_top(0), 0);
-        assert_eq!(state.row_top(1), 1);
-        assert_eq!(state.row_top(2), 1 + (1 + EXPANDED_EXTRA_ROWS));
-        assert_eq!(state.display_rows(), 5 + EXPANDED_EXTRA_ROWS);
+        assert_eq!(state.row_top(1), 2, "row 0 is `refs + commit` tall");
+        assert_eq!(state.row_top(2), 2 + (1 + EXPANDED_EXTRA_ROWS));
+        assert_eq!(state.display_rows(), 6 + EXPANDED_EXTRA_ROWS);
     }
 
     #[test]
@@ -1922,6 +2540,15 @@ mod tests {
             graph_width: 4,
             has_header: true,
             cdv: None,
+            // The hand-made geometry has no tab bar or branch pane, so no cell
+            // belongs to either surface.
+            tab_bar: ratatui::layout::Rect {
+                x: 0,
+                y: 0,
+                width: 100,
+                height: 0,
+            },
+            branch_pane: None,
         }
     }
 
@@ -2243,13 +2870,18 @@ mod tests {
     #[test]
     fn row_at_display_maps_every_display_row() {
         let mut state = state_of(linear(3));
+        // Row 0 owns a refs line plus its commit line (T7), so its block is two
+        // display rows tall and every later row shifts down by one.
+        assert_eq!(state.row_height(0), 2);
         assert_eq!(state.row_at_display(0), Some(0));
-        assert_eq!(state.row_at_display(2), Some(2));
-        assert_eq!(state.row_at_display(3), None);
+        assert_eq!(state.row_at_display(1), Some(0));
+        assert_eq!(state.row_at_display(2), Some(1));
+        assert_eq!(state.row_at_display(3), Some(2));
+        assert_eq!(state.row_at_display(4), None);
         state.expanded.insert(0);
-        // Row 0 now spans display rows 0..=EXPANDED_EXTRA_ROWS.
-        assert_eq!(state.row_at_display(EXPANDED_EXTRA_ROWS), Some(0));
-        assert_eq!(state.row_at_display(EXPANDED_EXTRA_ROWS + 1), Some(1));
+        // Row 0 now spans display rows 0..=1 + EXPANDED_EXTRA_ROWS.
+        assert_eq!(state.row_at_display(1 + EXPANDED_EXTRA_ROWS), Some(0));
+        assert_eq!(state.row_at_display(2 + EXPANDED_EXTRA_ROWS), Some(1));
     }
 
     #[test]
@@ -2262,6 +2894,207 @@ mod tests {
             state.surface_at(10, 0, &hit),
             Some(ClickTarget::ColumnHeader)
         );
+    }
+
+    /* -------------------------------------------------------------- */
+    /* M4-W12 — the tab bar and the branch pane as click surfaces      */
+    /* -------------------------------------------------------------- */
+
+    /// A state on the Branches tab with a few refs of every kind, plus the
+    /// geometry `main.rs` computes for a 100x24 screen.
+    fn branches_geometry() -> (AppState, HitGeometry) {
+        let mut state = state_of(linear(4));
+        state.tab = Tab::Branches;
+        state.branches = vec![
+            branch_entry("main", RefKind::Local, true),
+            branch_entry("dev", RefKind::Local, false),
+            branch_entry("origin/main", RefKind::Remote, false),
+            branch_entry("v1.0", RefKind::Tag, false),
+        ];
+        state.status.width = 100;
+        state.status.height = 22;
+        let view = view_of(&state);
+        let hit = crate::render::hit_geometry(&state, &view, 24).expect("geometry");
+        (state, hit)
+    }
+
+    fn branch_entry(name: &str, kind: RefKind, is_head: bool) -> BranchEntry {
+        BranchEntry {
+            name: name.to_string(),
+            refname: format!("refs/{name}"),
+            kind,
+            is_head,
+            count: 3,
+        }
+    }
+
+    /// A click on a tab label switches tabs, and the body no longer answers for
+    /// a cell that belongs to the bar (T1/T7).
+    #[test]
+    fn surface_at_reads_the_tab_bar_before_the_body() {
+        let (state, hit) = branches_geometry();
+        assert_eq!(hit.tab_bar.height, 1, "the bar is always drawn");
+        for (tab, span) in crate::render::tab_spans() {
+            let x = span.start;
+            assert_eq!(state.surface_at(x, 0, &hit), Some(ClickTarget::Tab(tab)));
+        }
+        // The separator between the labels is not a tab, and must not fall
+        // through to the body either.
+        assert_eq!(state.surface_at(0, 0, &hit), None);
+        // The body still answers normally one row below the bar. Row 0 is the
+        // table header, so the first commit row is `body.y + 1`.
+        assert!(matches!(
+            state.surface_at(hit.body.x, hit.body.y + 1, &hit),
+            Some(ClickTarget::Row(..))
+        ));
+    }
+
+    /// The left pane is its own surface: a cell inside it is a branch row, and a
+    /// cell just right of it is a commit row (T2).
+    #[test]
+    fn surface_at_routes_the_branch_pane_before_the_body() {
+        let (state, hit) = branches_geometry();
+        let pane = hit.branch_pane.expect("the Branches tab has a pane");
+        assert_eq!(pane.width, crate::render::BRANCH_PANE_WIDTH);
+        assert_eq!(hit.body.x, pane.width, "the body starts after the pane");
+        // The pane's rows are the group headings and the entries in order:
+        // `Local`, main, dev, `Remote`, origin/main, `Tag`, v1.0.
+        assert_eq!(state.surface_at(1, pane.y, &hit), None, "the heading");
+        assert_eq!(
+            state.surface_at(1, pane.y + 1, &hit),
+            Some(ClickTarget::Branch(0))
+        );
+        assert_eq!(
+            state.surface_at(1, pane.y + 2, &hit),
+            Some(ClickTarget::Branch(1))
+        );
+        assert_eq!(state.surface_at(1, pane.y + 3, &hit), None, "the heading");
+        assert_eq!(
+            state.surface_at(1, pane.y + 4, &hit),
+            Some(ClickTarget::Branch(2)),
+            "the remote entry sits under its own heading"
+        );
+        // Past the last row.
+        assert_eq!(state.surface_at(1, pane.y + 20, &hit), None);
+        // Right of the pane, the body answers again.
+        assert!(matches!(
+            state.surface_at(pane.width + 1, pane.y + 1, &hit),
+            Some(ClickTarget::Row(..))
+        ));
+    }
+
+    /// On the Overview tab there is no pane, so the same cell is a commit row.
+    #[test]
+    fn the_overview_tab_has_no_branch_pane() {
+        let (mut state, _) = branches_geometry();
+        state.tab = Tab::Overview;
+        let hit = crate::render::hit_geometry(&state, &view_of(&state), 24).expect("geometry");
+        assert!(hit.branch_pane.is_none());
+        assert_eq!(hit.body.x, 0);
+    }
+
+    /// A narrow terminal drops the pane rather than squeezing the history (T2).
+    #[test]
+    fn a_narrow_terminal_drops_the_branch_pane() {
+        let (mut state, _) = branches_geometry();
+        state.status.width = 50;
+        let hit = crate::render::hit_geometry(&state, &view_of(&state), 24).expect("geometry");
+        assert!(hit.branch_pane.is_none());
+        assert_eq!(hit.body.x, 0);
+    }
+
+    /// A click on a branch row moves the cursor onto it and filters the history
+    /// to that ref — the same pair of effects the `Enter` key has (T2).
+    #[test]
+    fn a_branch_click_selects_and_filters() {
+        // A real repo, because the filter asks git which commits the ref
+        // reaches; a made-up refname would be refused instead of applied.
+        let repo = temp_repo("branch-click");
+        data::run_git(&repo, &["branch", "dev"]).expect("git branch dev");
+        let mut state = state_of(linear(4));
+        state.tab = Tab::Branches;
+        state.branches = crate::branches::load(&repo).expect("branch list");
+        state.status.width = 100;
+        state.status.height = 22;
+        let hit = crate::render::hit_geometry(&state, &view_of(&state), 24).expect("geometry");
+        let pane = hit.branch_pane.expect("the pane");
+
+        let dev = state
+            .branches
+            .iter()
+            .position(|entry| entry.name == "dev")
+            .expect("`dev` is in the list");
+        let rows = crate::render::branch_rows(&state.branches);
+        let row = rows
+            .iter()
+            .position(|row| *row == crate::render::BranchRow::Entry(dev))
+            .expect("`dev` has a pane row");
+        let y = pane.y + row as u16;
+        assert_eq!(
+            state.surface_at(1, y, &hit),
+            Some(ClickTarget::Branch(dev)),
+            "the pane row for `dev` resolves back to it"
+        );
+
+        state.branch_selected = dev;
+        apply_branch_filter(&mut state, &repo);
+        assert_eq!(
+            state.branch_filter.as_deref(),
+            Some("refs/heads/dev"),
+            "the filter records the full refname"
+        );
+        assert_eq!(state.tab, Tab::Branches, "the click does not change tabs");
+        assert!(
+            state.status.error.is_none(),
+            "a real ref filters instead of erroring: {:?}",
+            state.status.error
+        );
+        let _ = fs::remove_dir_all(&repo);
+    }
+
+    /// The wheel walks the branch cursor over the pane and scrolls the history
+    /// everywhere else, clamped at both ends (T7).
+    #[test]
+    fn the_wheel_scrolls_the_surface_under_the_pointer() {
+        let mut state = state_of(linear(40));
+        state.status.height = 10;
+        // Over the history: a three-line step, clamped at zero.
+        state.scroll = 0;
+        wheel_scroll(&mut state, -WHEEL_LINES, false);
+        assert_eq!(state.scroll, 0, "the top is a hard stop");
+        wheel_scroll(&mut state, WHEEL_LINES, false);
+        assert_eq!(state.scroll, WHEEL_LINES as u16);
+        // Past the end: pinned to the last full screenful.
+        wheel_scroll(&mut state, 10_000, false);
+        let max = state.display_rows().saturating_sub(10);
+        assert_eq!(state.scroll, max);
+
+        // Over the pane: the cursor walks the branch list instead, one entry
+        // per notch, and clamps at both ends.
+        let (mut state, _) = branches_geometry();
+        state.branch_selected = 0;
+        wheel_scroll(&mut state, WHEEL_LINES, true);
+        assert_eq!(state.branch_selected, 1);
+        wheel_scroll(&mut state, -WHEEL_LINES, true);
+        assert_eq!(state.branch_selected, 0);
+        wheel_scroll(&mut state, -WHEEL_LINES, true);
+        assert_eq!(state.branch_selected, 0, "clamped at the first branch");
+        // Already at the end: another notch stays there.
+        state.branch_selected = state.branches.len() - 1;
+        wheel_scroll(&mut state, WHEEL_LINES, true);
+        assert_eq!(
+            state.branch_selected,
+            state.branches.len() - 1,
+            "clamped at the last branch"
+        );
+        // The same gesture on another tab still scrolls the history, because
+        // there is no pane to walk. The viewport has to be shorter than the
+        // history, or there is nothing to scroll.
+        state.tab = Tab::Overview;
+        state.status.height = 2;
+        state.scroll = 0;
+        wheel_scroll(&mut state, WHEEL_LINES, true);
+        assert_eq!(state.scroll, WHEEL_LINES as u16);
     }
 
     #[test]
@@ -2287,8 +3120,19 @@ mod tests {
             }
             other => panic!("expected a row hit, got {other:?}"),
         }
-        // Past the last commit, and outside the body entirely.
-        assert_eq!(state.surface_at(0, 4, &hit), None);
+        // Past the last commit, and outside the body entirely. Row 0 owns two
+        // display rows (refs + commit), so rows 1..3 are display rows 0..2.
+        // Every row in `refs_state` carries refs, so each owns two display rows.
+        assert_eq!(
+            state.surface_at(0, 5, &hit),
+            Some(ClickTarget::Row(
+                2,
+                MenuSurface::CommitRow,
+                "c2".to_string()
+            )),
+            "the last commit sits on display row 4"
+        );
+        assert_eq!(state.surface_at(0, 7, &hit), None, "past the last commit");
         assert_eq!(state.surface_at(101, 1, &hit), None);
         assert_eq!(state.surface_at(0, 99, &hit), None);
     }
@@ -2301,10 +3145,11 @@ mod tests {
         assert_eq!(
             state.surface_at(0, 1, &hit),
             Some(ClickTarget::Row(
-                2,
+                1,
                 MenuSurface::CommitRow,
-                "c2".to_string()
-            ))
+                "c1".to_string()
+            )),
+            "display row 2 is commit row 1, because row 0 owns two display rows"
         );
     }
 
@@ -2312,8 +3157,10 @@ mod tests {
     fn surface_at_on_a_row_with_no_refs_is_the_commit_menu() {
         let state = state_of(linear(3));
         let hit = geometry();
+        // Row 0 owns display rows 0 (refs) and 1 (commit), so row 1 starts at
+        // display row 2 — screen row 3 with the header.
         match state
-            .surface_at(95, 2, &hit)
+            .surface_at(95, 3, &hit)
             .expect("row 1 in the refs column")
         {
             ClickTarget::Row(1, surface, name) => {
@@ -2325,11 +3172,11 @@ mod tests {
     }
 
     /* -------------------------------------------------------------- */
-    /* W10 — the docked CDV as a click surface                         */
+    /* M4-W12 — the inline CDV as a click surface                      */
     /* -------------------------------------------------------------- */
 
     /// A loaded, uncommitted CDV listing one modified file per path, plus the
-    /// geometry that docks the panel under a 12-row body (W10).
+    /// geometry that puts the panel inline under row 0 (M4-W12/T3).
     fn cdv_geometry(paths: &[&str]) -> (AppState, HitGeometry) {
         let changes = paths
             .iter()
@@ -2343,20 +3190,24 @@ mod tests {
             })
             .collect();
         let mut state = state_of(linear(4));
-        // `main.rs` sizes the status bar to the screen minus the two chrome rows.
+        // `main.rs` sizes the status bar to the screen minus the chrome rows.
         state.status.width = 100;
         state.status.height = 22;
         state.cdv = Some(CdvState::uncommitted(0, changes));
         state.cdv_focused = true;
-        let mut hit = geometry();
-        hit.body.height = 12;
-        hit.cdv = Some(ratatui::layout::Rect {
-            x: 0,
-            y: 12,
-            width: 100,
-            height: 10,
-        });
+        // The panel only shows under an expanded row (T3).
+        state.expanded.insert(0);
+        let view = crate::render::ViewOptions {
+            graph: Some(&state.layout),
+            ..crate::render::ViewOptions::TEXT_ONLY
+        };
+        let hit = crate::render::hit_geometry(&state, &view, 24).expect("geometry");
         (state, hit)
+    }
+
+    /// A column inside `cdv_geometry`'s inline panel (past the graph gutter).
+    fn cdv_x(hit: &HitGeometry) -> u16 {
+        hit.cdv.expect("the panel has a rect").x + 1
     }
 
     /// Screen row of file row `index` inside `cdv_geometry`'s panel.
@@ -2382,7 +3233,7 @@ mod tests {
         // A file row is the `FileRow` menu's subject, and the cell carries its
         // full path — the two must agree or the menu would act on another file.
         assert_eq!(
-            state.surface_at(1, cdv_row_y(&state, &hit, file), &hit),
+            state.surface_at(cdv_x(&hit), cdv_row_y(&state, &hit, file), &hit),
             Some(ClickTarget::CdvFile(rows[file].path.clone())),
             "a file row resolves to its own path"
         );
@@ -2390,24 +3241,35 @@ mod tests {
         // reference flips it open/closed on click, so it must not fall through
         // to the commit-row menu below the panel (INT-050).
         assert_eq!(
-            state.surface_at(1, cdv_row_y(&state, &hit, folder), &hit),
+            state.surface_at(cdv_x(&hit), cdv_row_y(&state, &hit, folder), &hit),
             Some(ClickTarget::CdvFolder(rows[folder].path.clone())),
             "a folder row resolves to its own path"
         );
         // The border column and the empty space under the last row are not rows.
-        assert_eq!(
-            state.surface_at(0, cdv_row_y(&state, &hit, file), &hit),
-            None
+        assert!(
+            !matches!(
+                state.surface_at(hit.cdv.unwrap().x, cdv_row_y(&state, &hit, file), &hit),
+                Some(ClickTarget::CdvFile(_)) | Some(ClickTarget::CdvFolder(_))
+            ),
+            "the panel border is not a file row"
         );
-        assert_eq!(
-            state.surface_at(1, cdv_row_y(&state, &hit, rows.len() + 1), &hit),
-            None,
-            "past the last row is empty"
+        assert!(
+            !matches!(
+                state.surface_at(cdv_x(&hit), cdv_row_y(&state, &hit, rows.len() + 1), &hit),
+                Some(ClickTarget::CdvFile(_)) | Some(ClickTarget::CdvFolder(_))
+            ),
+            "past the last row is not a file row"
         );
-        // The first body row is still a commit row: the panel did not swallow it.
+        // The rows around the inline panel are still commit rows: the panel did
+        // not swallow the history it is embedded in.
         assert!(matches!(
-            state.surface_at(0, 1, &hit),
+            state.surface_at(0, 2, &hit),
             Some(ClickTarget::Row(0, _, _))
+        ));
+        let last = hit.cdv.unwrap().bottom() + 2;
+        assert!(matches!(
+            state.surface_at(0, last, &hit),
+            Some(ClickTarget::Row(_, _, _))
         ));
     }
 
@@ -2421,7 +3283,7 @@ mod tests {
             .expect("a tree view folds src/ into a folder row");
         let path = rows[folder].path.clone();
         let target = state
-            .surface_at(1, cdv_row_y(&state, &hit, folder), &hit)
+            .surface_at(cdv_x(&hit), cdv_row_y(&state, &hit, folder), &hit)
             .expect("the folder row is a click target");
         assert_eq!(target, ClickTarget::CdvFolder(path.clone()));
 
@@ -2451,12 +3313,14 @@ mod tests {
         state.cdv = None;
         hit.cdv = None;
         // With the panel closed no cell can be a file row, and the body is the
-        // only surface left — row 12 is past the four commits, so it is empty.
-        assert_eq!(state.surface_at(1, 13, &hit), None, "past the last commit");
+        // only surface left. Row 0 owns two display rows, so screen row 6 (the
+        // display row the panel used to start at) is past the four commits.
+        let x = hit.graph_width + 1;
+        assert_eq!(state.surface_at(x, 12, &hit), None, "past the last commit");
         for y in 0..24 {
             assert!(
                 !matches!(
-                    state.surface_at(1, y, &hit),
+                    state.surface_at(x, y, &hit),
                     Some(ClickTarget::CdvFile(_)) | Some(ClickTarget::CdvFolder(_))
                 ),
                 "row {y} must not resolve to a closed panel"
@@ -2465,44 +3329,48 @@ mod tests {
     }
 
     #[test]
-    fn hit_geometry_docks_the_cdv_under_the_body() {
-        let (mut state, _) = cdv_geometry(&["src/lib.rs"]);
-        let panel = state.cdv.as_ref().unwrap();
-        let panel_rows = crate::cdv::panel_height(panel, 24, 1);
-        let view = crate::render::ViewOptions {
-            graph: Some(&state.layout),
-            ..crate::render::ViewOptions::TEXT_ONLY
-        };
-        let hit = crate::render::hit_geometry(&state, &view, 24).expect("geometry");
+    fn hit_geometry_places_the_cdv_inline_under_its_row() {
+        let (mut state, hit) = cdv_geometry(&["src/lib.rs"]);
         let cdv = hit.cdv.expect("the panel is open, so it has a rect");
+        // `body` is the table pane (header first); the graph body is one row
+        // lower, and row 0's block is `refs + commit + panel` (T3/T7).
         assert_eq!(
-            cdv.y, hit.body.height,
-            "the panel starts where the body ends"
+            cdv.y,
+            hit.body.y + 3,
+            "the panel sits two display rows under the body top"
         );
-        assert_eq!(cdv.height, panel_rows);
-        assert_eq!(
-            hit.body.height + cdv.height + 1,
-            24,
-            "body + panel + status bar fill the screen"
-        );
-        // Before W10 the body was `status.height + 1`, which ignored the panel
-        // and reached over it: the commit rows would cover the file rows.
         assert!(
-            hit.body.height < state.status.height,
-            "the body must not cover the docked panel"
+            cdv.y + cdv.height <= hit.body.bottom(),
+            "the inline panel stays inside the body"
         );
+        assert_eq!(
+            cdv.width,
+            hit.body.width - hit.graph_width,
+            "the panel spans the text area"
+        );
+        // The panel no longer steals rows from the body: it is part of the flow.
+        assert_eq!(hit.body.height, 22);
         state.find.visible = true;
-        let with_find = crate::render::hit_geometry(&state, &view, 24).expect("geometry");
+        let with_find =
+            crate::render::hit_geometry(&state, &view_of(&state), 24).expect("geometry");
         let overlays = crate::render::overlay_rows(&state, 24);
         assert_eq!(
-            with_find.body.height + with_find.cdv.unwrap().height + overlays.find + 1,
+            with_find.body.height + overlays.find + overlays.tabs + 1,
             24,
-            "body + panel + find bar + status bar fill the screen"
+            "body + find bar + tab bar + status bar fill the screen"
         );
         assert!(
             with_find.body.height < hit.body.height,
             "the find bar is charged to the body too"
         );
+    }
+
+    /// The `ViewOptions` the CDV-geometry tests pass to `hit_geometry`.
+    fn view_of(state: &AppState) -> crate::render::ViewOptions<'_> {
+        crate::render::ViewOptions {
+            graph: Some(&state.layout),
+            ..crate::render::ViewOptions::TEXT_ONLY
+        }
     }
 
     #[test]
@@ -2515,7 +3383,10 @@ mod tests {
             .expect("two file rows");
         let y = cdv_row_y(&state, &hit, last);
         let path = rows[last].path.clone();
-        match state.surface_at(1, y, &hit).expect("the file row") {
+        match state
+            .surface_at(cdv_x(&hit), y, &hit)
+            .expect("the file row")
+        {
             ClickTarget::CdvFile(hit_path) => {
                 assert_eq!(hit_path, path);
                 state.cdv.as_mut().unwrap().select_path(&hit_path);

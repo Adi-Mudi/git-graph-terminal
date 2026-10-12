@@ -177,6 +177,8 @@ pub fn find_key_for(key: KeyEvent) -> Option<FindKey> {
 /// | `e` | A68 Open File | file-row menu |
 /// | `Space` | A69/A70 toggle Reviewed (VIS-049) | the row's `Reviewed` cell |
 /// | `R` | A71 Reset File to this Revision | file-row menu (gated) |
+/// | `Enter` | open the file's diff **inline** (M4-W12/T5) | file-row menu |
+/// | `p` | A65 view diff full-screen | file-row menu |
 /// | `y` / `Y` | A72/A73 copy absolute / relative path | file-row menu |
 /// | `Left` | collapse folder | `alterFileTreeFolderOpen` |
 /// | `Right` | expand folder | `alterFileTreeFolderOpen` |
@@ -187,7 +189,10 @@ pub fn cdv_key_for(key: KeyEvent) -> Option<Action> {
     match key.code {
         KeyCode::Down | KeyCode::Char('j') => Some(Action::CdvFileNext),
         KeyCode::Up | KeyCode::Char('k') => Some(Action::CdvFilePrev),
-        KeyCode::Enter => Some(Action::CdvFileViewDiff),
+        // M4-W12/T5: `Enter` grows the diff in place, under the file row. The
+        // full-screen pager (A65) moved to `p` so both remain reachable.
+        KeyCode::Enter => Some(Action::InlineFileOpenDiff),
+        KeyCode::Char('p') | KeyCode::Char('P') => Some(Action::CdvFileViewDiff),
         KeyCode::Char('o') | KeyCode::Char('O') => Some(Action::CdvFileViewRevision),
         // A67/A68 — the two rows the W7 slice left to the menu (W10).
         KeyCode::Char('w') | KeyCode::Char('W') => Some(Action::CdvFileViewDiffWithWorkingFile),
@@ -255,16 +260,35 @@ pub fn action_for(key: KeyEvent) -> Option<Action> {
         // W6/T3 — the commit details view.
         KeyCode::Char('w') if ctrl => Some(Action::CdvClose),
         KeyCode::Char('d') if !shift => Some(Action::CdvOpen),
-        KeyCode::Tab => Some(Action::CdvFocusToggle),
+        // M4-W12/T1: `Tab` cycles the body tabs; `Shift+Tab` still focuses the
+        // inline commit-details file list.
+        KeyCode::Tab => Some(Action::TabToggle),
+        KeyCode::BackTab => Some(Action::CdvFocusToggle),
         KeyCode::Char('v') if !ctrl => Some(Action::CdvToggleView),
         KeyCode::Char('+') | KeyCode::Char('=') => Some(Action::CdvResizeUp),
         KeyCode::Char('-') | KeyCode::Char('_') => Some(Action::CdvResizeDown),
 
+        // M4-W12/T1 — the tab bar.
+        KeyCode::Char('1') => Some(Action::TabOverview),
+        KeyCode::Char('2') => Some(Action::TabBranches),
+        // M4-W12/T2 — filter the history to the selected branch. The natural
+        // `Enter` gesture is wired in `reduce`, which knows the active tab.
+        KeyCode::Char('b') if !ctrl => Some(Action::BranchFilter),
+        // M4-W12/T2 — the branch-list cursor, alongside `j`/`k` on that tab.
+        KeyCode::Char(']') => Some(Action::BranchNext),
+        KeyCode::Char('[') => Some(Action::BranchPrev),
+
         // W7/T4 — the uncommitted and comparison CDV kinds. The reference opens
         // both from the table (the virtual uncommitted row, and `compareWithHash`
         // set from the commit menu), so a terminal needs keys for them.
-        KeyCode::Char('u') if !ctrl => Some(Action::CdvOpenUncommitted),
+        // M4-W12/T4: plain `u` now jumps into the inline uncommitted section;
+        // `Shift+U` keeps the older docked uncommitted panel reachable.
+        KeyCode::Char('u') if !shift => Some(Action::UncommittedToggle),
+        KeyCode::Char('U') => Some(Action::CdvOpenUncommitted),
         KeyCode::Char('c') => Some(Action::CompareMark),
+
+        // M4-W12/T6 — open the selected file's two revisions in `$GGT_EDITOR`.
+        KeyCode::Char('e') if !ctrl => Some(Action::EditorOpen),
 
         // Branch nav: Right = first parent, Left = first child; Ctrl+Down/Up are aliases.
         KeyCode::Right => Some(Action::NextBranch),
@@ -816,7 +840,9 @@ mod tests {
     #[test]
     fn cdv_keys_stand_in_for_the_cdv_controls() {
         assert_eq!(action_for(key(KeyCode::Char('d'))), Some(Action::CdvOpen));
-        assert_eq!(action_for(key(KeyCode::Tab)), Some(Action::CdvFocusToggle));
+        // `Tab` used to cycle the docked panel's focus. M4-W12/T3 made the panel
+        // inline, so `Tab` now switches the tab bar instead (T1).
+        assert_eq!(action_for(key(KeyCode::Tab)), Some(Action::TabToggle));
         assert_eq!(
             action_for(key(KeyCode::Char('v'))),
             Some(Action::CdvToggleView),
@@ -877,7 +903,8 @@ mod tests {
             // The focused CDV file list owns these (W7/T3).
             CdvFileNext => (Route::Cdv, key(KeyCode::Char('j'))),
             CdvFilePrev => (Route::Cdv, key(KeyCode::Char('k'))),
-            CdvFileViewDiff => (Route::Cdv, key(KeyCode::Enter)),
+            InlineFileOpenDiff => (Route::Cdv, key(KeyCode::Enter)),
+            CdvFileViewDiff => (Route::Cdv, key(KeyCode::Char('p'))),
             CdvFileViewRevision => (Route::Cdv, key(KeyCode::Char('o'))),
             CdvFileToggleReviewed => (Route::Cdv, key(KeyCode::Char(' '))),
             CdvFolderCollapse => (Route::Cdv, key(KeyCode::Left)),
@@ -906,7 +933,7 @@ mod tests {
                 Route::Global,
                 modified(KeyCode::Char('w'), KeyModifiers::CONTROL),
             ),
-            CdvFocusToggle => (Route::Global, key(KeyCode::Tab)),
+            CdvFocusToggle => (Route::Global, key(KeyCode::BackTab)),
             CdvToggleView => (Route::Global, key(KeyCode::Char('v'))),
             CdvResizeUp => (Route::Global, key(KeyCode::Char('+'))),
             CdvResizeDown => (Route::Global, key(KeyCode::Char('-'))),
@@ -926,8 +953,17 @@ mod tests {
                 Route::Global,
                 modified(KeyCode::Char('d'), KeyModifiers::ALT),
             ),
-            CdvOpenUncommitted => (Route::Global, key(KeyCode::Char('u'))),
+            CdvOpenUncommitted => (Route::Global, key(KeyCode::Char('U'))),
             CompareMark => (Route::Global, key(KeyCode::Char('c'))),
+            // M4-W12 — tabs, branches, the uncommitted section, the editor.
+            TabOverview => (Route::Global, key(KeyCode::Char('1'))),
+            TabBranches => (Route::Global, key(KeyCode::Char('2'))),
+            TabToggle => (Route::Global, key(KeyCode::Tab)),
+            BranchNext => (Route::Global, key(KeyCode::Char(']'))),
+            BranchPrev => (Route::Global, key(KeyCode::Char('['))),
+            BranchFilter => (Route::Global, key(KeyCode::Char('b'))),
+            UncommittedToggle => (Route::Global, key(KeyCode::Char('u'))),
+            EditorOpen => (Route::Global, key(KeyCode::Char('e'))),
         }
     }
 

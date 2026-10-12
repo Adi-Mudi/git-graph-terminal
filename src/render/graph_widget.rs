@@ -10,8 +10,6 @@
 //! (expanded rows occupy more than one display row), so the text-column table
 //! next to it can use the exact same display offsets and stay aligned.
 
-use std::collections::HashSet;
-
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -34,10 +32,15 @@ pub struct GraphWidget<'a> {
     pub uncommitted: Option<RowIdx>,
     /// First **display** row shown at `area.y` (expanded rows are taller than one).
     pub scroll: u16,
-    /// Rows whose details are expanded (they reserve `detail_rows` extra rows).
-    pub expanded: &'a HashSet<RowIdx>,
-    /// Extra terminal rows a single expanded row occupies (W4 gap; W5 CDV).
-    pub detail_rows: u16,
+    /// Rows shown **before** the first layout row — the inline uncommitted
+    /// section, which the Overview tab draws above the history (M4-W12/T4).
+    pub leading: u16,
+    /// The display-row height of every layout row, indexed by row (M4-W12/T1:
+    /// a block is `refs + commit + details + diff`). A missing entry is `1`.
+    pub heights: &'a [u16],
+    /// The rows to draw, in order. The Branches tab hides the rows its filter
+    /// excludes, so the widget can no longer assume `0..rows.len()`.
+    pub visible: &'a [RowIdx],
 }
 
 impl Widget for GraphWidget<'_> {
@@ -49,13 +52,17 @@ impl Widget for GraphWidget<'_> {
 
         // `cursor` is the display row at the top of the next layout row, relative
         // to the viewport top (`scroll`), so it can be negative.
-        let mut cursor: i32 = -(self.scroll as i32);
-        for row in self.layout.rows.iter() {
-            let height = if self.expanded.contains(&row.row) {
-                1 + self.detail_rows as i32
-            } else {
-                1
+        let mut cursor: i32 = self.leading as i32 - self.scroll as i32;
+        for &index in self.visible {
+            let Some(row) = self.layout.rows.get(index as usize) else {
+                continue;
             };
+            let height = self
+                .heights
+                .get(index as usize)
+                .copied()
+                .unwrap_or(1)
+                .max(1) as i32;
             let top = cursor;
             cursor += height;
             // A row whose top is above the viewport (`top < 0`) is scrolled off;
@@ -67,8 +74,8 @@ impl Widget for GraphWidget<'_> {
                 break;
             }
             let y = area.y + top as u16;
-            let uncommitted = self.uncommitted == Some(row.row);
-            let selected = self.selected == Some(row.row);
+            let uncommitted = self.uncommitted == Some(index);
+            let selected = self.selected == Some(index);
             let glyphs = self.ladder.glyphs();
             let built = build_row(
                 row,
@@ -188,18 +195,32 @@ mod tests {
             .collect()
     }
 
+    /// One display row per layout row; `expanded` rows get `1 + detail`.
+    fn heights(count: usize, expanded: &[usize], detail: u16) -> Vec<u16> {
+        (0..count)
+            .map(|i| if expanded.contains(&i) { 1 + detail } else { 1 })
+            .collect()
+    }
+
+    /// Every row index of `demo_layout()`, in order.
+    fn all_rows() -> Vec<RowIdx> {
+        (0..demo_layout().rows.len() as RowIdx).collect()
+    }
+
     #[test]
     fn paints_the_mock_graph_vertically_connected() {
         let layout = demo_layout();
-        let expanded = HashSet::new();
+        let h = heights(layout.rows.len(), &[], 0);
+        let v = all_rows();
         let widget = GraphWidget {
             layout: &layout,
             ladder: Ladder::unlimited(),
             selected: None,
             uncommitted: Some(0),
             scroll: 0,
-            expanded: &expanded,
-            detail_rows: 0,
+            leading: 0,
+            heights: &h,
+            visible: &v,
         };
         let out = lines(widget, 4, 5);
         assert_eq!(out[0], "┄"); // uncommitted stub
@@ -212,15 +233,17 @@ mod tests {
     #[test]
     fn scroll_shifts_the_visible_window() {
         let layout = demo_layout();
-        let expanded = HashSet::new();
+        let h = heights(layout.rows.len(), &[], 0);
+        let v = all_rows();
         let widget = GraphWidget {
             layout: &layout,
             ladder: Ladder::mono_ascii(),
             selected: None,
             uncommitted: None,
             scroll: 1,
-            expanded: &expanded,
-            detail_rows: 0,
+            leading: 0,
+            heights: &h,
+            visible: &v,
         };
         let out = lines(widget, 4, 2);
         assert_eq!(out[0], "o"); // HEAD rendered as ascii 'o'
@@ -228,17 +251,43 @@ mod tests {
     }
 
     #[test]
+    fn leading_rows_push_the_graph_down() {
+        // M4-W12/T4: the uncommitted section sits above the first commit, so
+        // the graph must start one row lower instead of at the very top.
+        let layout = demo_layout();
+        let h = heights(layout.rows.len(), &[], 0);
+        let v = all_rows();
+        let widget = GraphWidget {
+            layout: &layout,
+            ladder: Ladder::unlimited(),
+            selected: None,
+            uncommitted: Some(0),
+            scroll: 0,
+            leading: 2,
+            heights: &h,
+            visible: &v,
+        };
+        let out = lines(widget, 4, 4);
+        assert_eq!(out[0], "", "the leading rows stay empty");
+        assert_eq!(out[1], "", "the leading rows stay empty");
+        assert_eq!(out[2], "┄", "row 0 now starts at display row 2");
+        assert_eq!(out[3], "◯");
+    }
+
+    #[test]
     fn selection_marks_the_whole_row() {
         let layout = demo_layout();
-        let expanded = HashSet::new();
+        let h = heights(layout.rows.len(), &[], 0);
+        let v = all_rows();
         let widget = GraphWidget {
             layout: &layout,
             ladder: Ladder::unlimited().with_colour(ColourTier::Mono),
             selected: Some(1),
             uncommitted: None,
             scroll: 0,
-            expanded: &expanded,
-            detail_rows: 0,
+            leading: 0,
+            heights: &h,
+            visible: &v,
         };
         let area = Rect::new(0, 0, 4, 2);
         let mut buf = Buffer::empty(area);
@@ -254,15 +303,17 @@ mod tests {
     #[test]
     fn colour_follows_the_frozen_palette() {
         let layout = demo_layout();
-        let expanded = HashSet::new();
+        let h = heights(layout.rows.len(), &[], 0);
+        let v = all_rows();
         let widget = GraphWidget {
             layout: &layout,
             ladder: Ladder::unlimited(),
             selected: None,
             uncommitted: None,
             scroll: 1,
-            expanded: &expanded,
-            detail_rows: 0,
+            leading: 0,
+            heights: &h,
+            visible: &v,
         };
         let area = Rect::new(0, 0, 4, 1);
         let mut buf = Buffer::empty(area);
@@ -274,15 +325,17 @@ mod tests {
     #[test]
     fn clips_to_the_area_width() {
         let layout = demo_layout();
-        let expanded = HashSet::new();
+        let h = heights(layout.rows.len(), &[], 0);
+        let v = all_rows();
         let widget = GraphWidget {
             layout: &layout,
             ladder: Ladder::unlimited().with_colour(ColourTier::Mono),
             selected: None,
             uncommitted: None,
             scroll: 0,
-            expanded: &expanded,
-            detail_rows: 0,
+            leading: 0,
+            heights: &h,
+            visible: &v,
         };
         // One cell wide: no panic, only the first column is written.
         let out = lines(widget, 1, 3);
@@ -293,16 +346,17 @@ mod tests {
     fn expanded_row_reserves_the_gap_and_keeps_verticals() {
         let layout = demo_layout();
         // Layout row 2 is the merge `●─╮` (row 0 uncommitted, row 1 HEAD).
-        let mut expanded = HashSet::new();
-        expanded.insert(2);
+        let h = heights(layout.rows.len(), &[2], 4);
+        let v = all_rows();
         let widget = GraphWidget {
             layout: &layout,
             ladder: Ladder::unlimited(),
             selected: None,
             uncommitted: Some(0),
             scroll: 0,
-            expanded: &expanded,
-            detail_rows: 4,
+            leading: 0,
+            heights: &h,
+            visible: &v,
         };
         let out = lines(widget, 4, 8);
         assert_eq!(out[2], "●─╮", "the expanded row's own line is unchanged");
